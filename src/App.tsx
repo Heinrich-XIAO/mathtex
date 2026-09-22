@@ -82,9 +82,11 @@ export default function App() {
     } catch (e) {
       setStatus("error");
       setError(
-        e instanceof DOMException && e.name === "NotAllowedError"
-          ? "Microphone permission denied — allow mic access and try again."
-          : `Could not start recording: ${(e as Error).message}`,
+        typeof navigator.mediaDevices === "undefined"
+          ? "Mic API unavailable — this app needs a secure context. Open it via https:// or localhost (not plain http:// on a LAN IP)."
+          : e instanceof DOMException && e.name === "NotAllowedError"
+            ? "Microphone permission denied — allow mic access and try again."
+            : `Could not start recording: ${(e as Error).message}`,
       );
     }
   }, []);

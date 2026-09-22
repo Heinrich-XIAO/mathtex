@@ -1,8 +1,10 @@
-// Catch-all Vercel function: forwards /api/* to the Hack Club AI proxy and
-// injects the Authorization header server-side so the key never reaches the
-// browser. Mirrors the Vite dev/preview proxy (see vite.config.ts).
+// Catch-all Vercel function: forwards /api/* to the upstream OpenAI-compatible
+// endpoint and injects the Authorization header server-side so the key never
+// reaches the browser. Mirrors the Vite dev/preview proxy (see vite.config.ts).
 // ESM: package.json has "type": "module".
-const TARGET = "https://ai.hackclub.com/proxy/v1";
+// UPSTREAM_BASE_URL lets prod use a different provider than local dev
+// (e.g. openrouter.ai — the Hack Club proxy blocks datacenter IPs).
+const TARGET = process.env.UPSTREAM_BASE_URL || "https://ai.hackclub.com/proxy/v1";
 
 export const maxDuration = 60;
 

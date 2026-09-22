@@ -1,37 +1,23 @@
-// Catch-all Vercel function: forwards /api/* to the upstream OpenAI-compatible
-// endpoint and injects the Authorization header server-side so the key never
-// reaches the browser. Mirrors the Vite dev/preview proxy (see vite.config.ts).
-// ESM: package.json has "type": "module".
+// Shared forwarding logic for /api/* Vercel functions.
+// Forwards to the upstream OpenAI-compatible endpoint and injects the
+// Authorization header server-side so the key never reaches the browser.
 // UPSTREAM_BASE_URL lets prod use a different provider than local dev
 // (e.g. openrouter.ai — the Hack Club proxy blocks datacenter IPs).
 const TARGET = process.env.UPSTREAM_BASE_URL || "https://ai.hackclub.com/proxy/v1";
 
-export const maxDuration = 60;
-
-export default async function handler(req, res) {
-  if (req.method === "OPTIONS") {
-    res.status(204).end();
-    return;
-  }
-
+export async function proxy(req, res, subpath) {
   const key = process.env.OPENROUTER_API_KEY;
   if (!key) {
     res.status(500).json({ error: { message: "Missing OPENROUTER_API_KEY env var" } });
     return;
   }
 
-  const subpath = Array.isArray(req.query.path)
-    ? req.query.path.join("/")
-    : req.query.path || "";
   const url = req.url || "";
-  let qs = url.includes("?") ? url.slice(url.indexOf("?")) : "";
-  // Strip Vercel-internal protection-bypass params so they are not forwarded upstream
-  const params = new URLSearchParams(qs);
+  const params = new URLSearchParams(url.includes("?") ? url.slice(url.indexOf("?") + 1) : "");
   for (const p of [...params.keys()]) {
     if (p.startsWith("x-vercel-")) params.delete(p);
   }
-  const qsClean = params.toString();
-  qs = qsClean ? `?${qsClean}` : "";
+  const qs = params.size ? `?${params}` : "";
 
   try {
     const upstream = await fetch(`${TARGET}/${subpath}${qs}`, {

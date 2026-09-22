@@ -24,7 +24,14 @@ export default async function handler(req, res) {
     ? req.query.path.join("/")
     : req.query.path || "";
   const url = req.url || "";
-  const qs = url.includes("?") ? url.slice(url.indexOf("?")) : "";
+  let qs = url.includes("?") ? url.slice(url.indexOf("?")) : "";
+  // Strip Vercel-internal protection-bypass params so they are not forwarded upstream
+  const params = new URLSearchParams(qs);
+  for (const p of [...params.keys()]) {
+    if (p.startsWith("x-vercel-")) params.delete(p);
+  }
+  const qsClean = params.toString();
+  qs = qsClean ? `?${qsClean}` : "";
 
   try {
     const upstream = await fetch(`${TARGET}/${subpath}${qs}`, {

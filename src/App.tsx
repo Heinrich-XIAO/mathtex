@@ -67,7 +67,9 @@ export default function App() {
   const [lines, setLines] = useState<Line[]>([]);
   const recorderRef = useRef<PushToTalk | null>(null);
   const statusRef = useRef<Status>("idle");
-  statusRef.current = status;
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
   const start = useCallback(async () => {
     if (statusRef.current !== "idle") return;

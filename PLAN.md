@@ -16,8 +16,8 @@
 | Output | Copy LaTeX per line + all; export PNG/SVG |
 | Storage | Local-first (IndexedDB / Dexie), cloud sync later behind a flag |
 | Mic | Push-to-talk (button / hold spacebar); continuous listening not in v1 |
-| Keys | Use the machine's existing key — `OPENROUTER_API_KEY` in `~/.bashrc:31` is a **Hack Club AI proxy** key (`sk-hc-v1`), not an OpenRouter key |
-| Endpoint | `https://ai.hackclub.com/proxy/v1` (OpenAI-compatible chat completions) |
+| Keys | Use the machine's existing key — `OPENROUTER_API_KEY` in `~/.bashrc:31` is a **Hack Club AI proxy** key (`sk-hc-v1`), not an OpenRouter key. It is read server-side by the Vite proxy and **never reaches the browser bundle** |
+| Endpoint | `https://ai.hackclub.com/proxy/v1` (OpenAI-compatible chat completions), tunneled through a same-origin `/api` proxy — the proxy sends no CORS headers, so direct browser calls fail; dev/preview route `/api/*` through Vite's proxy which injects the Authorization header server-side |
 | Model | Dropdown over the proxy's OpenRouter-style catalog; default = audio-capable Gemini Flash |
 | Config | Key lives in a gitignored `.env`; never in code, never committed |
 
@@ -29,12 +29,16 @@
         ▼
 [ WAV encode (mono 16 kHz PCM16, client-side) ]
         ▼
-[ Hack Club proxy: audio-capable LLM ]   ← one call: audio + context
+[ same-origin POST /api/chat/completions ]
+        ▼
+[ Vite proxy → Hack Club proxy (Authorization injected server-side) ]
         │  strict JSON response
         ▼
-[ Zod validation + one auto-retry ] → [ KaTeX render ] → [ line in file ]
+[ parse + one auto-retry on bad JSON / missing latex ]
         ▼
-[ IndexedDB (Dexie): files, lines, audio blobs ]
+[ KaTeX render ] → [ line in file ]
+        ▼
+[ IndexedDB (Dexie): files, lines, audio blobs ]  (M2)
 ```
 
 Single model call returns:
@@ -82,8 +86,14 @@ Failure mode: confidence below 0.7 → amber "not sure — check this" state on 
 3. **Latency (~1–3s)** — acceptable for push-to-talk; "thinking" state + level meter makes it feel intentional.
 4. **Key hygiene** — proxy key stays in gitignored `.env`; never shipped in commits.
 
+## Status
+
+- **M1 — DONE & verified.** Push-to-talk → WAV → `/api` proxy → JSON → KaTeX. Verified with espeak-synthesized audio of the dy/dx example (returns `\frac{dy}{dx} = x^2 \cdot x^3`, confidence 0.95) and a live browser run (fake mic device) covering: page load, listening state, KaTeX render, transcript caption, confidence dot, copy, real API round-trip.
+- **M2 — next:** Dexie files/multi-line, conversational editing (replace_line/delete_last already wired), transcript captions polish, per-line copy (M1 keeps last-line copy only).
+- **M3 — next:** settings UI (model dropdown), PNG/SVG export, undo, PWA.
+
 ## Milestones
 
-- **M1 — Core loop:** push-to-talk → proxy → JSON → KaTeX on screen. Single line, key from `.env`. The dy/dx example works end-to-end.
+- **M1 — Core loop:** push-to-talk → proxy → JSON → KaTeX on screen. Single line, key server-side. The dy/dx example works end-to-end. ✅
 - **M2 — Product:** Dexie files/multi-line, conversational editing, transcript captions, confidence states, copy.
 - **M3 — Finish:** settings UI (model dropdown), PNG/SVG export, undo, PWA.

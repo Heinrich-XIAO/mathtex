@@ -1,0 +1,241 @@
+:root {
+  color-scheme: dark;
+  font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --bg: #0e1116;
+  --card: #161b23;
+  --card-edge: #232b37;
+  --text: #e8ecf1;
+  --muted: #8a94a3;
+  --accent: #7c9cff;
+  --green: #4ade80;
+  --amber: #e5b567;
+  --red: #f87171;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: radial-gradient(1200px 700px at 50% -10%, #1a2130 0%, var(--bg) 60%);
+  color: var(--text);
+}
+
+.app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+.header {
+  text-align: center;
+  padding: 28px 0 8px;
+}
+
+.header h1 {
+  margin: 0;
+  font-size: 1.6rem;
+  letter-spacing: 0.02em;
+}
+
+.tagline {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.stage {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 16px;
+  padding: 24px 0;
+  overflow-y: auto;
+}
+
+.placeholder {
+  text-align: center;
+  color: var(--muted);
+}
+
+.hero {
+  font-size: 1.15rem;
+  color: var(--text);
+  margin: 0 0 10px;
+}
+
+kbd {
+  background: var(--card);
+  border: 1px solid var(--card-edge);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-family: inherit;
+  font-size: 0.9em;
+}
+
+.example .spoken {
+  color: var(--accent);
+  font-style: italic;
+}
+
+.lines {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.line {
+  background: var(--card);
+  border: 1px solid var(--card-edge);
+  border-radius: 14px;
+  padding: 20px 24px 12px;
+}
+
+.line.low {
+  border-color: color-mix(in srgb, var(--amber) 45%, var(--card));
+}
+
+.latex {
+  overflow-x: auto;
+  text-align: center;
+  font-size: 1.35rem;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  min-height: 18px;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.dot.green {
+  background: var(--green);
+}
+
+.dot.amber {
+  background: var(--amber);
+}
+
+.note {
+  color: var(--amber);
+}
+
+.copy {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--card-edge);
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 2px 10px;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.copy:hover {
+  color: var(--text);
+  border-color: var(--muted);
+}
+
+.error-banner {
+  background: color-mix(in srgb, var(--red) 14%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--red) 40%, transparent);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dismiss {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+.footer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0 28px;
+}
+
+.meter {
+  width: 160px;
+  height: 4px;
+  background: var(--card-edge);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.fill {
+  height: 100%;
+  background: var(--accent);
+  transform-origin: left;
+  transform: scaleX(0);
+  transition: transform 60ms linear;
+}
+
+.mic {
+  width: 68px;
+  height: 68px;
+  border-radius: 50%;
+  border: none;
+  background: linear-gradient(180deg, #2a3547, #202a3a);
+  color: var(--text);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 6px 24px rgb(0 0 0 / 35%);
+  transition: box-shadow 150ms, transform 80ms;
+  touch-action: none;
+  user-select: none;
+}
+
+.mic:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.mic.on {
+  background: linear-gradient(180deg, #4a6df0, #3552c8);
+  animation: pulse 1.4s ease-out infinite;
+}
+
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgb(124 156 255 / 45%); }
+  100% { box-shadow: 0 0 0 22px rgb(124 156 255 / 0%); }
+}
+
+.status {
+  color: var(--muted);
+  font-size: 0.85rem;
+  min-height: 1.2em;
+}

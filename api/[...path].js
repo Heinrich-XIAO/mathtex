@@ -1,9 +1,12 @@
 // Catch-all Vercel function: forwards /api/* to the Hack Club AI proxy and
 // injects the Authorization header server-side so the key never reaches the
 // browser. Mirrors the Vite dev/preview proxy (see vite.config.ts).
+// ESM: package.json has "type": "module".
 const TARGET = "https://ai.hackclub.com/proxy/v1";
 
-module.exports = async function handler(req, res) {
+export const maxDuration = 60;
+
+export default async function handler(req, res) {
   if (req.method === "OPTIONS") {
     res.status(204).end();
     return;
@@ -38,4 +41,4 @@ module.exports = async function handler(req, res) {
   } catch (e) {
     res.status(502).json({ error: { message: `Upstream error: ${String(e).slice(0, 200)}` } });
   }
-};
+}

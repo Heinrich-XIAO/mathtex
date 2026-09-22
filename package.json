@@ -13,7 +13,8 @@
   "dependencies": {
     "katex": "^0.18.7",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "vercel": "^59.25.2"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

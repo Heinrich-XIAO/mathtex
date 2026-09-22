@@ -10,6 +10,8 @@ STRICT RULES:
 JSON shape:
 {"mode": "append" | "replace_line" | "delete_last" | "noop", "transcript": "...", "latex": "...", "confidence": 0.0-1.0, "note": "..."}
 
+Emit the keys in exactly this order: mode, transcript, latex, confidence, note.
+
 - mode "append": normal dictation, "latex" holds the new equation ("" if nothing mathy was said).
 - mode "replace_line": the audio asks to change an existing line (e.g. "change squared to cubed"); "latex" holds the corrected version of the current line.
 - mode "delete_last": the audio asks to remove the last line (e.g. "scratch that", "delete that").

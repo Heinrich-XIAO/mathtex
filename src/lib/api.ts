@@ -14,6 +14,10 @@ export interface CallContext {
   lines: { latex: string }[];
 }
 
+export interface ProgressEvent {
+  transcript?: string;
+}
+
 const BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 const MODEL = import.meta.env.VITE_MODEL || "google/gemini-3.8-flash";
 
@@ -71,9 +75,11 @@ function parseResult(raw: string): DictationResult {
 export async function dictate(
   wav: ArrayBuffer,
   ctx: CallContext,
-  signal?: AbortSignal,
+  opts?: { onProgress?: (p: ProgressEvent) => void; signal?: AbortSignal },
 ): Promise<DictationResult> {
   mustConfig();
+  const onProgress = opts?.onProgress;
+  const signal = opts?.signal;
   const b64 = arrayBufferToBase64(wav);
 
   const messages: unknown[] = [
@@ -96,7 +102,8 @@ export async function dictate(
       body: JSON.stringify({
         model: MODEL,
         temperature: 0,
-        max_tokens: 600,
+        max_tokens: 400,
+        stream: true,
         ...(useJsonFormat ? { response_format: { type: "json_object" } } : {}),
         messages,
       }),
@@ -107,12 +114,7 @@ export async function dictate(
       (err as Error & { status?: number }).status = res.status;
       throw err;
     }
-    const data = (await res.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) throw new Error("Model returned empty response");
-    return content;
+    return readContent(res, onProgress);
   };
 
   let content: string;
@@ -135,7 +137,7 @@ export async function dictate(
       body: JSON.stringify({
         model: MODEL,
         temperature: 0,
-        max_tokens: 600,
+        max_tokens: 400,
         messages: [
           ...messages,
           { role: "assistant", content },
@@ -157,4 +159,54 @@ export async function dictate(
     if (!retryContent) throw new Error("Model returned empty response on retry");
     return parseResult(retryContent);
   }
+}
+
+async function readContent(
+  res: Response,
+  onProgress?: (p: ProgressEvent) => void,
+): Promise<string> {
+  if (!res.body) {
+    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    return data.choices?.[0]?.message?.content ?? "";
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let content = "";
+
+  const extractTranscript = (raw: string) => {
+    const m = raw.match(/"transcript"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    if (!m) return;
+    try {
+      onProgress?.({ transcript: JSON.parse(`"${m[1]}"`) as string });
+    } catch {
+      /* partial escape sequence — next chunk will fix it */
+    }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (payload === "[DONE]") return content;
+      try {
+        const j = JSON.parse(payload) as { choices?: { delta?: { content?: string } }[] };
+        const delta = j.choices?.[0]?.delta?.content;
+        if (typeof delta === "string" && delta) {
+          content += delta;
+          extractTranscript(content);
+        }
+      } catch {
+        /* partial SSE line */
+      }
+    }
+  }
+  return content;
 }

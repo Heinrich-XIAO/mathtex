@@ -65,6 +65,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [level, setLevel] = useState(0);
   const [lines, setLines] = useState<Line[]>([]);
+  const [heard, setHeard] = useState("");
   const recorderRef = useRef<PushToTalk | null>(null);
   const statusRef = useRef<Status>("idle");
   useEffect(() => {
@@ -74,6 +75,13 @@ export default function App() {
   const start = useCallback(async () => {
     if (statusRef.current !== "idle") return;
     setError("");
+    setHeard("");
+    // Warm the serverless function while the user is speaking (fire-and-forget)
+    void fetch("/api/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    }).catch(() => {});
     const ptt = recorderRef.current ?? (recorderRef.current = new PushToTalk());
     ptt.onLevel = setLevel;
     try {
@@ -97,7 +105,11 @@ export default function App() {
     try {
       const blob = await recorderRef.current.stop();
       const wav = await blobToWav(blob);
-      const result = await dictate(wav, { lines: lines.map((l) => ({ latex: l.latex })) });
+      const result = await dictate(wav, { lines: lines.map((l) => ({ latex: l.latex })) }, {
+        onProgress: (p) => {
+          if (p.transcript) setHeard(p.transcript);
+        },
+      });
       setLines((prev) => applyResult(prev, result));
       setStatus("idle");
     } catch (e) {
@@ -208,7 +220,13 @@ export default function App() {
           </svg>
         </button>
         <div className="status">
-          {thinking ? "thinking…" : listening ? "listening — release to send" : "hold space to talk"}
+          {thinking
+            ? heard
+              ? `heard: “${heard}”`
+              : "thinking…"
+            : listening
+              ? "listening — release to send"
+              : "hold space to talk"}
         </div>
       </footer>
     </div>

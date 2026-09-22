@@ -30,9 +30,20 @@ export async function proxy(req, res, subpath) {
     });
 
     res.status(upstream.status);
-    const ct = upstream.headers.get("content-type");
-    if (ct) res.setHeader("Content-Type", ct);
-    res.send(await upstream.text());
+    res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/json");
+
+    // Stream pass-through so the client sees bytes as the model generates
+    if (upstream.body) {
+      const reader = upstream.body.getReader();
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        res.write(Buffer.from(value));
+      }
+      res.end();
+    } else {
+      res.send(await upstream.text());
+    }
   } catch (e) {
     res.status(502).json({ error: { message: `Upstream error: ${String(e).slice(0, 200)}` } });
   }

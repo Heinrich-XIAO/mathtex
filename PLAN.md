@@ -17,7 +17,8 @@
 | Storage | Local-first (IndexedDB / Dexie), cloud sync later behind a flag |
 | Mic | Push-to-talk (button / hold spacebar); continuous listening not in v1 |
 | Keys | Use the machine's existing key — `OPENROUTER_API_KEY` in `~/.bashrc:31` is a **Hack Club AI proxy** key (`sk-hc-v1`), not an OpenRouter key. It is read server-side by the Vite proxy and **never reaches the browser bundle** |
-| Endpoint | `https://ai.hackclub.com/proxy/v1` (OpenAI-compatible chat completions), tunneled through a same-origin `/api` proxy — the proxy sends no CORS headers, so direct browser calls fail; dev/preview route `/api/*` through Vite's proxy which injects the Authorization header server-side |
+| Endpoint | Prod: `https://openrouter.ai/api/v1` (OpenRouter key, works from datacenter IPs). Local dev: `https://ai.hackclub.com/proxy/v1` (the Hack Club proxy **blocks datacenter IPs**, so Vercel can't use it). Upstream selected via `UPSTREAM_BASE_URL` env |
+| Hosting | Vercel (https://mathtex.vercel.app): static build + serverless `api/chat/completions.js` and `api/models.js` (concrete routes — the Vite preset's builder never matched a `[...path].js` catch-all). Key injected server-side, never in the browser bundle |
 | Model | Dropdown over the proxy's OpenRouter-style catalog; default = audio-capable Gemini Flash |
 | Config | Key lives in a gitignored `.env`; never in code, never committed |
 
@@ -88,9 +89,15 @@ Failure mode: confidence below 0.7 → amber "not sure — check this" state on 
 
 ## Status
 
-- **M1 — DONE & verified.** Push-to-talk → WAV → `/api` proxy → JSON → KaTeX. Verified with espeak-synthesized audio of the dy/dx example (returns `\frac{dy}{dx} = x^2 \cdot x^3`, confidence 0.95) and a live browser run (fake mic device) covering: page load, listening state, KaTeX render, transcript caption, confidence dot, copy, real API round-trip.
-- **M2 — next:** Dexie files/multi-line, conversational editing (replace_line/delete_last already wired), transcript captions polish, per-line copy (M1 keeps last-line copy only).
-- **M3 — next:** settings UI (model dropdown), PNG/SVG export, undo, PWA.
+- **M1 — DONE, deployed to https://mathtex.vercel.app.** Push-to-talk → WAV → same-origin `/api` → serverless proxy → upstream LLM → JSON → KaTeX. Verified end-to-end on prod: espeak audio of the dy/dx example → `\frac{dy}{dx} = x^2 \cdot x^3`, confidence 0.98, `audio_tokens: 97`. Local https deploy (self-signed cert) also running on :4173.
+- **M2 — next:** Dexie files/multi-line, conversational editing (replace_line/delete_last already wired), per-line copy.
+- **M3 — next:** settings UI (model dropdown via /api/models), PNG/SVG export, undo, PWA.
+
+## Deploy notes
+
+- Vercel gotchas hit and solved: `"type": "module"` requires ESM function exports; the Vite preset never routes `[...path].js` catch-alls (use concrete files); `vercel curl` appends `x-vercel-*` bypass query params that must be stripped before forwarding upstream.
+- Local dev uses the Hack Club proxy key from `~/.bashrc`; prod uses the OpenRouter key (configured as Vercel env `OPENROUTER_API_KEY`, server-side only).
+- Prod is public — anyone with the URL can spend API credits. Vercel dashboard → Deployment Protection can restrict access if needed.
 
 ## Milestones
 

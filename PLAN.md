@@ -87,6 +87,22 @@ Failure mode: confidence below 0.7 → amber "not sure — check this" state on 
 3. **Latency (~1–3s)** — acceptable for push-to-talk; "thinking" state + level meter makes it feel intentional.
 4. **Key hygiene** — proxy key stays in gitignored `.env`; never shipped in commits.
 
+## Latency (M1.5)
+
+Measured baseline (prod, gemini-3.8-flash): 3.3–5.4s, ~480 reasoning tokens per call.
+
+**Model benchmark** (espeak utterances, timed, correctness-normalized): `gemini-3.5-flash-lite` wins — 1.2–1.7s, 6/6 correct, zero reasoning tokens (vs 6.9s / 1-of-4 for 3.8-flash baseline; `qwen3.8-omni-flash` 7.6s and 0/4). Adopted.
+
+**Changes shipped:**
+- Model → `google/gemini-3.5-flash-lite`, `max_tokens` 600→400
+- Prompt emits keys in fixed order (mode, transcript, latex, …) so the transcript streams before the latex
+- Stream pass-through in the Vercel functions + SSE client parser with progressive transcript ("heard: …" appears while thinking)
+- Lambda warm-up fired at mic press (not page load), using an invalid `{}` body so it costs nothing
+
+**Prod timings after:** TTFB 1.24–1.33s, total 1.44–1.53s (was 3.3–5.4s). Verified in-browser with an SSE-faithful e2e (progressive transcript + render) and a real round-trip.
+
+**Deferred options:** silence trimming (user vetoed), direct Gemini API (staying on OpenRouter for benchmarkability), two-stage streaming ASR (architecture change).
+
 ## Status
 
 - **M1 — DONE, deployed to https://mathtex.vercel.app.** Push-to-talk → WAV → same-origin `/api` → serverless proxy → upstream LLM → JSON → KaTeX. Verified end-to-end on prod: espeak audio of the dy/dx example → `\frac{dy}{dx} = x^2 \cdot x^3`, confidence 0.98, `audio_tokens: 97`. Local https deploy (self-signed cert) also running on :4173.

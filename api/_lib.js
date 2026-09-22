@@ -1,14 +1,14 @@
 // Shared forwarding logic for /api/* Vercel functions.
 // Forwards to the upstream OpenAI-compatible endpoint and injects the
 // Authorization header server-side so the key never reaches the browser.
-// UPSTREAM_BASE_URL lets prod use a different provider than local dev
-// (e.g. openrouter.ai — the Hack Club proxy blocks datacenter IPs).
-const TARGET = process.env.UPSTREAM_BASE_URL || "https://ai.hackclub.com/proxy/v1";
+const TARGET = process.env.UPSTREAM_BASE_URL;
 
 export async function proxy(req, res, subpath) {
   const key = process.env.OPENROUTER_API_KEY;
-  if (!key) {
-    res.status(500).json({ error: { message: "Missing OPENROUTER_API_KEY env var" } });
+  if (!TARGET || !key) {
+    res.status(500).json({
+      error: { message: "Missing UPSTREAM_BASE_URL or OPENROUTER_API_KEY env vars" },
+    });
     return;
   }
 

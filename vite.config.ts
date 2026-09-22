@@ -16,11 +16,10 @@ export default defineConfig(({ mode }) => {
   // loadEnv with empty prefix picks up non-VITE_ vars too (server-side only)
   const env = loadEnv(mode, process.cwd(), '')
   const proxyConfig = {
-    // Same-origin tunnel to the Hack Club AI proxy — the proxy does not send
-    // CORS headers, so browser calls are proxied here. The API key is added
-    // server-side and never reaches the browser bundle.
+    // Same-origin tunnel so browser calls work without CORS. The OpenRouter
+    // key is added server-side and never reaches the browser bundle.
     '/api': {
-      target: 'https://ai.hackclub.com/proxy/v1',
+      target: env.UPSTREAM_BASE_URL || 'https://openrouter.ai/api/v1',
       changeOrigin: true,
       rewrite: (p: string) => p.replace(/^\/api/, ''),
       ...(env.OPENROUTER_API_KEY

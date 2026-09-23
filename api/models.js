@@ -1,5 +1,7 @@
 import { proxy } from "./_lib.js";
 
-export default async function handler(req, res) {
-  await proxy(req, res, "models");
+export const config = { runtime: "edge" };
+
+export default async function handler(request) {
+  return proxy(request, "models");
 }

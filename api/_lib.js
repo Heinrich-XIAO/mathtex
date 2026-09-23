@@ -1,50 +1,54 @@
-// Shared forwarding logic for /api/* Vercel functions.
+// Shared forwarding logic for the /api/* Edge functions.
 // Forwards to the upstream OpenAI-compatible endpoint and injects the
 // Authorization header server-side so the key never reaches the browser.
+// UPSTREAM_BASE_URL lets prod use a different provider than local dev.
+// Edge runtime: Web Request/Response, streams pass-through natively.
 const TARGET = process.env.UPSTREAM_BASE_URL;
 
-export async function proxy(req, res, subpath) {
+export async function proxy(request, subpath) {
   const key = process.env.OPENROUTER_API_KEY;
   if (!TARGET || !key) {
-    res.status(500).json({
-      error: { message: "Missing UPSTREAM_BASE_URL or OPENROUTER_API_KEY env vars" },
-    });
-    return;
+    return new Response(
+      JSON.stringify({ error: { message: "Missing UPSTREAM_BASE_URL or OPENROUTER_API_KEY env vars" } }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
   }
 
-  const url = req.url || "";
-  const params = new URLSearchParams(url.includes("?") ? url.slice(url.indexOf("?") + 1) : "");
+  const url = new URL(request.url);
+  const params = new URLSearchParams(url.search);
   for (const p of [...params.keys()]) {
     if (p.startsWith("x-vercel-")) params.delete(p);
   }
   const qs = params.size ? `?${params}` : "";
 
+  let body;
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    const raw = await request.text();
+    try {
+      body = JSON.stringify(JSON.parse(raw));
+    } catch {
+      body = raw; // forward as-is (e.g. warm-up "{}" pings)
+    }
+  }
+
   try {
     const upstream = await fetch(`${TARGET}/${subpath}${qs}`, {
-      method: req.method,
+      method: request.method,
       headers: {
-        "Content-Type": req.headers["content-type"] || "application/json",
+        "Content-Type": request.headers.get("content-type") || "application/json",
         Authorization: `Bearer ${key}`,
       },
-      body: req.method === "GET" || req.method === "HEAD" ? undefined : JSON.stringify(req.body),
+      body,
     });
 
-    res.status(upstream.status);
-    res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/json");
-
-    // Stream pass-through so the client sees bytes as the model generates
-    if (upstream.body) {
-      const reader = upstream.body.getReader();
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        res.write(Buffer.from(value));
-      }
-      res.end();
-    } else {
-      res.send(await upstream.text());
-    }
+    const headers = new Headers();
+    const ct = upstream.headers.get("content-type");
+    if (ct) headers.set("Content-Type", ct);
+    return new Response(upstream.body, { status: upstream.status, headers });
   } catch (e) {
-    res.status(502).json({ error: { message: `Upstream error: ${String(e).slice(0, 200)}` } });
+    return new Response(
+      JSON.stringify({ error: { message: `Upstream error: ${String(e).slice(0, 200)}` } }),
+      { status: 502, headers: { "Content-Type": "application/json" } },
+    );
   }
 }

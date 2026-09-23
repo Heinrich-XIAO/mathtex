@@ -108,7 +108,7 @@ export async function dictate(
       body: JSON.stringify({
         model: MODEL,
         temperature: 0,
-        max_tokens: 400,
+        max_tokens: 200,
         stream: true,
         ...(useJsonFormat ? { response_format: { type: "json_object" } } : {}),
         messages,
@@ -143,7 +143,7 @@ export async function dictate(
       body: JSON.stringify({
         model: MODEL,
         temperature: 0,
-        max_tokens: 400,
+        max_tokens: 200,
         messages: [
           ...messages,
           { role: "assistant", content },

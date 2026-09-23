@@ -1,4 +1,4 @@
-import * as ort from "onnxruntime-web";
+import * as ort from "onnxruntime-web/wasm";
 
 // Silero VAD (public/vad/silero_vad.onnx). Runs locally, ~1ms per 512-sample
 // frame via WASM. Analysis runs in parallel with the API call — never

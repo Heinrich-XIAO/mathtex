@@ -6,9 +6,6 @@ export class PushToTalk {
   private chunks: Blob[] = [];
   private audioCtx: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
-  private captureNode: ScriptProcessorNode | null = null;
-  private mute: GainNode | null = null;
-  private source: MediaStreamAudioSourceNode | null = null;
   private raf = 0;
   private levelData: Uint8Array<ArrayBuffer> | null = null;
   private startedAt = 0;

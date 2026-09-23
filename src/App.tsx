@@ -136,6 +136,7 @@ export default function App() {
   const [liveText, setLiveText] = useState("");
   const liveTimer = useRef<number | null>(null);
   const liveInFlight = useRef(false);
+  const liveCoverageRef = useRef(0); // ms of audio covered by the last completed poll
   const targetRef = useRef<number | undefined>(undefined);
   useEffect(() => {
     targetRef.current = targetIndex;
@@ -158,6 +159,7 @@ export default function App() {
     if (statusRef.current !== "idle") return;
     setError("");
     setLiveText("");
+    liveCoverageRef.current = 0;
     // Warm the serverless function while the user is speaking (fire-and-forget)
     void fetch("/api/chat/completions", {
       method: "POST",
@@ -180,7 +182,10 @@ export default function App() {
             const { pcm, durationMs } = rec.snapshotPcm();
             if (durationMs > 700) {
               const text = await liveTranscribe(pcm);
-              if (statusRef.current === "listening" && text) setLiveText(text);
+              if (statusRef.current === "listening" && text) {
+                liveCoverageRef.current = durationMs;
+                setLiveText(text);
+              }
             }
           } catch {
             /* transient — next poll retries */
@@ -223,16 +228,26 @@ export default function App() {
         setStatus("idle");
         return;
       }
-      const wavAndPcm = await blobToWav(blob);
+            const wavAndPcm = await blobToWav(blob);
       const ctx = { lines: lines.map((l) => ({ latex: l.latex })), targetIndex: target };
-      // Live flow: transcript is already known — only the text→LaTeX pass runs.
-      // Any failure in the fast path falls back to the full audio pipeline.
+      // Live flow: if the last poll covered (nearly) the whole hold, its
+      // transcript is complete — text→LaTeX only (~0.4s). Otherwise do one
+      // final full-clip transcription first (~0.8s total). Any failure in the
+      // fast path falls back to the full audio pipeline.
       const speechPromise = analyzeSpeech(wavAndPcm.pcm);
       const live = liveText.trim() && liveTranscriptionEnabled();
+      const coverageOk =
+        live &&
+        liveCoverageRef.current >= Math.max(600, durationMs * 0.85);
       let result: DictationResult | null = null;
       if (live) {
         try {
-          result = await consolidateTranscript(liveText.trim(), ctx);
+          if (coverageOk) {
+            result = await consolidateTranscript(liveText.trim(), ctx);
+          } else {
+            const fullText = await liveTranscribe(wavAndPcm.pcm);
+            if (fullText) result = await consolidateTranscript(fullText, ctx);
+          }
         } catch {
           result = null; // fall back below
         }

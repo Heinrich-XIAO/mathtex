@@ -1,17 +1,18 @@
 import { SYSTEM_PROMPT } from "./prompt";
 
-export type Mode = "append" | "replace_line" | "delete_last" | "noop";
+export type Mode = "append" | "append_lines" | "replace_line" | "delete_last" | "noop";
 
 export interface DictationResult {
   mode: Mode;
   transcript: string;
-  latex: string;
+  lines: string[];
   confidence: number;
   note: string;
 }
 
 export interface CallContext {
   lines: { latex: string }[];
+  targetIndex?: number;
 }
 
 export interface ProgressEvent {
@@ -36,6 +37,9 @@ function contextText(ctx: CallContext): string {
   const numbered = ctx.lines
     .map((l, i) => `${i + 1}. ${l.latex || "(empty)"}`)
     .join("\n");
+  if (ctx.targetIndex !== undefined && ctx.targetIndex >= 0 && ctx.targetIndex < ctx.lines.length) {
+    return `Current file lines (most recent last):\n${numbered}\n\nTARGET LINE: line ${ctx.targetIndex + 1} (${ctx.lines[ctx.targetIndex].latex}). The audio is an edit instruction for THIS line only. Listen to the audio and produce the JSON object.`;
+  }
   return `Current file lines (most recent last):\n${numbered}\n\nThe current line is line ${ctx.lines.length}. Listen to the audio and produce the JSON object.`;
 }
 
@@ -56,20 +60,27 @@ function stripFences(s: string): string {
 
 function parseResult(raw: string): DictationResult {
   const obj = JSON.parse(stripFences(raw)) as Record<string, unknown>;
-  const modes: Mode[] = ["append", "replace_line", "delete_last", "noop"];
+  const modes: Mode[] = ["append", "append_lines", "replace_line", "delete_last", "noop"];
   const mode = modes.includes(obj.mode as Mode) ? (obj.mode as Mode) : "append";
-  const latex = typeof obj.latex === "string" ? obj.latex : "";
+  const lines: string[] = Array.isArray(obj.latex)
+    ? obj.latex.filter((l): l is string => typeof l === "string")
+    : typeof obj.latex === "string"
+      ? [obj.latex]
+      : [];
   const transcript = typeof obj.transcript === "string" ? obj.transcript : "";
   const confidence =
     typeof obj.confidence === "number" && obj.confidence >= 0 && obj.confidence <= 1
       ? obj.confidence
       : 0.8;
   const note = typeof obj.note === "string" ? obj.note : "";
-  const needsLatex = mode === "append" || mode === "replace_line";
-  if (needsLatex && !latex) {
+  const needsLatex = mode === "append" || mode === "append_lines" || mode === "replace_line";
+  if (needsLatex && lines.length === 0) {
     throw new Error(`Missing "latex" in model response: ${JSON.stringify(obj).slice(0, 200)}`);
   }
-  return { mode, transcript, latex, confidence, note };
+  if (mode === "append_lines" && lines.length < 2) {
+    throw new Error(`"append_lines" requires multiple lines: ${JSON.stringify(obj).slice(0, 200)}`);
+  }
+  return { mode, transcript, lines, confidence, note };
 }
 
 export async function dictate(

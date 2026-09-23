@@ -142,6 +142,34 @@ kbd {
   color: var(--amber);
 }
 
+.line.targeted {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgb(124 156 255 / 18%);
+}
+
+.line-mic {
+  background: transparent;
+  border: 1px solid var(--card-edge);
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 1px 7px;
+  cursor: pointer;
+  display: inline-grid;
+  place-items: center;
+  touch-action: none;
+  user-select: none;
+}
+
+.line-mic:hover {
+  color: var(--text);
+  border-color: var(--muted);
+}
+
+.line-mic:active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 .copy {
   margin-left: auto;
   background: transparent;

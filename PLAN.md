@@ -106,7 +106,8 @@ Measured baseline (prod, gemini-3.8-flash): 3.3–5.4s, ~480 reasoning tokens pe
 ## Status
 
 - **M1 — DONE, deployed to https://mathtex.vercel.app.** Push-to-talk → WAV → same-origin `/api` → serverless proxy → upstream LLM → JSON → KaTeX. Verified end-to-end on prod: espeak audio of the dy/dx example → `\frac{dy}{dx} = x^2 \cdot x^3`, confidence 0.98, `audio_tokens: 97`. Local https deploy (self-signed cert) also running on :4173.
-- **M2 — next:** Dexie files/multi-line, conversational editing (replace_line/delete_last already wired), per-line copy.
+- **M2 partial — shipped early:** `append_lines` mode (one utterance → multiple lines, e.g. worked steps) and per-line voice targeting (mini-mic on each line; "get rid of the x² after the x⁴" edits only that line via `replace_line` + target index in context). No-unspoken-algebra rule stays. Verified in browser.
+- **M2 — remaining:** Dexie files/multi-line persistence, undo.
 - **M3 — next:** settings UI (model dropdown via /api/models), PNG/SVG export, undo, PWA.
 
 ## Deploy notes

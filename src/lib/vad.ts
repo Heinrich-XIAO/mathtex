@@ -12,7 +12,8 @@ async function getSession(): Promise<ort.InferenceSession> {
   if (!sessionPromise) {
     sessionPromise = (async () => {
       ort.env.wasm.numThreads = 1; // no SharedArrayBuffer/COOP needed
-      ort.env.wasm.proxy = true; // run in a worker — must not block the main thread
+      // No proxy worker: ORT 1.30's worker needs variant wasm files we don't
+      // ship. Session is warmed at mic press so compile cost hides in the hold.
       ort.env.wasm.wasmPaths = "/ort/"; // same-origin, no CORS/CDN dependency
       return ort.InferenceSession.create("/vad/silero_vad.onnx", {
         executionProviders: ["wasm"],

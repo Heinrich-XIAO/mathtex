@@ -13,7 +13,7 @@ async function getSession(): Promise<ort.InferenceSession> {
     sessionPromise = (async () => {
       ort.env.wasm.numThreads = 1; // no SharedArrayBuffer/COOP needed
       ort.env.wasm.proxy = true; // run in a worker — must not block the main thread
-      ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/";
+      ort.env.wasm.wasmPaths = "/ort/"; // same-origin, no CORS/CDN dependency
       return ort.InferenceSession.create("/vad/silero_vad.onnx", {
         executionProviders: ["wasm"],
       });

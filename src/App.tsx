@@ -169,7 +169,8 @@ export default function App() {
     try {
       await ptt.start();
       setStatus("listening");
-      // Live transcription loop: re-transcribe the growing audio every 1.2s
+      // Live transcription loop: re-transcribe the growing audio every 1.2s.
+      // First poll is scheduled (not run inline) so statusRef has settled.
       const poll = async () => {
         const rec = recorderRef.current;
         if (!rec || statusRef.current !== "listening") return;
@@ -190,7 +191,9 @@ export default function App() {
           liveTimer.current = window.setTimeout(() => void poll(), 1200);
         }
       };
-      if (liveTranscriptionEnabled()) void poll();
+      if (liveTranscriptionEnabled()) {
+        liveTimer.current = window.setTimeout(() => void poll(), 1200);
+      }
     } catch (e) {
       setStatus("error");
       setError(

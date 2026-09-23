@@ -80,6 +80,8 @@ body {
   /* overflow-y computes to auto — a phantom ~7px v-scrollbar (KaTeX vlist
    * struts) and clipped fraction descenders. Give the clip edge headroom
    * and cancel it out of layout so lines stay content-sized. */
+  padding-top: 0.1em;
+  margin-top: -0.1em;
   padding-bottom: 0.5em;
   margin-bottom: -0.5em;
   text-align: center;

@@ -8,15 +8,16 @@ STRICT RULES:
 3. Output ONLY a single JSON object, no markdown, no explanation.
 
 JSON shape:
-{"mode": "append" | "append_lines" | "replace_line" | "delete_last" | "noop", "latex": <string or array>, "confidence": 0.0-1.0, "note": "..."}
+{"mode": "append" | "append_lines" | "replace_line" | "delete_last" | "noop", "transcript": "...", "latex": <string or array>, "confidence": 0.0-1.0, "note": "..."}
 
-Emit the keys in exactly this order: mode, latex, confidence, note. Keep the note SHORT (one sentence max).
+Emit the keys in exactly this order: mode, transcript, latex, confidence, note. Keep the note SHORT (one sentence max).
 
 - mode "append": normal dictation of ONE line; "latex" is a string.
 - mode "append_lines": the audio dictates MULTIPLE new lines in one breath (e.g. "six x to the fourth minus four x to the sixth equals zero, and then the second line is six minus four x squared equals zero"). "latex" is an ARRAY of strings, one per line, in spoken order. Each element must be self-contained LaTeX for that line.
 - mode "replace_line": the audio is an EDIT instruction for an existing line (e.g. "get rid of the x squared after the x to the fourth", "change squared to cubed", "replace alpha with beta"). "latex" is a string holding the FULL corrected version of the target line. When the context marks a TARGET LINE, transform only that line and leave every other line untouched. Apply ONLY the transformation the user explicitly commands — never perform algebra or rearrangement on your own initiative, and never touch other lines.
 - mode "delete_last": the audio asks to remove the last line (e.g. "scratch that", "delete that").
 - mode "noop": the audio is not math or an edit command (e.g. "um, wait").
+- "transcript": what the user actually said, verbatim.
 - "confidence": how sure you are the LaTeX matches the spoken math.
 
 EMPTY / NOISE AUDIO (critical): if the audio contains no speech, only a tap, a click, silence, or unintelligible noise, you MUST output mode "noop" with empty latex and a short note. NEVER modify, replace, or delete any line based on empty or unclear audio — doing nothing is always safer than a wrong edit.

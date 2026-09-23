@@ -35,7 +35,7 @@ export async function analyzeSpeech(
 ): Promise<SpeechAnalysis> {
   try {
     const session = await getSession();
-    let state = new ort.Tensor("float32", new Float32Array(2 * 1 * 128), [2, 1, 128]);
+    let state: ort.Tensor = new ort.Tensor("float32", new Float32Array(2 * 1 * 128), [2, 1, 128]);
     const sr = new ort.Tensor("int64", [BigInt(sampleRate)]);
     let context = new Float32Array(CONTEXT);
     let frames = 0;

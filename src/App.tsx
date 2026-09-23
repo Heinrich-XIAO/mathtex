@@ -166,8 +166,11 @@ export default function App() {
     setStatus("thinking");
     try {
       const { blob, durationMs, peak } = await recorderRef.current.stop();
-      // Blank recording (tap, click, silence): discard without calling the API
-      if (durationMs < 400 || peak < 0.045) {
+      // Blank recording (tap, click, silence, ambient noise): discard before calling the API
+      const isTargetedEdit = target !== undefined;
+      const minDuration = isTargetedEdit ? 800 : 400;
+      const minPeak = isTargetedEdit ? 0.09 : 0.06;
+      if (durationMs < minDuration || peak < minPeak) {
         setTargetIndex(undefined);
         setStatus("idle");
         return;

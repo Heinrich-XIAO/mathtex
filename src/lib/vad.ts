@@ -12,6 +12,7 @@ async function getSession(): Promise<ort.InferenceSession> {
   if (!sessionPromise) {
     sessionPromise = (async () => {
       ort.env.wasm.numThreads = 1; // no SharedArrayBuffer/COOP needed
+      ort.env.wasm.proxy = true; // run in a worker — must not block the main thread
       ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/";
       return ort.InferenceSession.create("/vad/silero_vad.onnx", {
         executionProviders: ["wasm"],
@@ -19,6 +20,12 @@ async function getSession(): Promise<ort.InferenceSession> {
     })();
   }
   return sessionPromise;
+}
+
+/** Pre-warms the ORT session; call when the mic is pressed so the WASM
+ * compile (the expensive part) happens while the user is still speaking. */
+export function warmVad(): void {
+  void getSession();
 }
 
 const CHUNK = 512; // 32ms @ 16kHz

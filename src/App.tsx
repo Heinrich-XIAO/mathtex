@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import katex from "katex";
 import { PushToTalk } from "./lib/recorder";
 import { blobToWav } from "./lib/wav";
-import { analyzeSpeech } from "./lib/vad";
+import { analyzeSpeech, warmVad } from "./lib/vad";
 import { dictate, ConfigError, type DictationResult } from "./lib/api";
 
 type Status = "idle" | "listening" | "thinking" | "error";
@@ -146,6 +146,7 @@ export default function App() {
       body: "{}",
     }).catch(() => {});
     const ptt = recorderRef.current ?? (recorderRef.current = new PushToTalk());
+    warmVad(); // WASM compile happens during the user's hold, not after release
     try {
       await ptt.start();
       setStatus("listening");

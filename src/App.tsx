@@ -116,7 +116,6 @@ export default function App() {
   const start = useCallback(async () => {
     if (statusRef.current !== "idle") return;
     setError("");
-    setHeard("");
     // Warm the serverless function while the user is speaking (fire-and-forget)
     void fetch("/api/chat/completions", {
       method: "POST",

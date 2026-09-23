@@ -3,7 +3,13 @@ import katex from "katex";
 import { PushToTalk } from "./lib/recorder";
 import { blobToWav } from "./lib/wav";
 import { analyzeSpeech, warmVad } from "./lib/vad";
-import { dictate, ConfigError, type DictationResult } from "./lib/api";
+import {
+  dictate,
+  liveTranscribe,
+  liveTranscriptionEnabled,
+  ConfigError,
+  type DictationResult,
+} from "./lib/api";
 
 type Status = "idle" | "listening" | "thinking" | "error";
 
@@ -126,6 +132,9 @@ export default function App() {
   const [past, setPast] = useState<Line[][]>([]);
   const [future, setFuture] = useState<Line[][]>([]);
   const [targetIndex, setTargetIndex] = useState<number | undefined>(undefined);
+  const [liveText, setLiveText] = useState("");
+  const liveTimer = useRef<number | null>(null);
+  const liveInFlight = useRef(false);
   const targetRef = useRef<number | undefined>(undefined);
   useEffect(() => {
     targetRef.current = targetIndex;
@@ -136,9 +145,18 @@ export default function App() {
     statusRef.current = status;
   }, [status]);
 
+  const stopLivePolls = useCallback(() => {
+    if (liveTimer.current !== null) {
+      window.clearTimeout(liveTimer.current);
+      liveTimer.current = null;
+    }
+    liveInFlight.current = false;
+  }, []);
+
   const start = useCallback(async () => {
     if (statusRef.current !== "idle") return;
     setError("");
+    setLiveText("");
     // Warm the serverless function while the user is speaking (fire-and-forget)
     void fetch("/api/chat/completions", {
       method: "POST",
@@ -150,6 +168,28 @@ export default function App() {
     try {
       await ptt.start();
       setStatus("listening");
+      // Live transcription loop: re-transcribe the growing audio every 1.2s
+      const poll = async () => {
+        const rec = recorderRef.current;
+        if (!rec || statusRef.current !== "listening") return;
+        if (!liveInFlight.current) {
+          liveInFlight.current = true;
+          try {
+            const { pcm, durationMs } = rec.snapshotPcm();
+            if (durationMs > 700) {
+              const text = await liveTranscribe(pcm);
+              if (statusRef.current === "listening" && text) setLiveText(text);
+            }
+          } catch {
+            /* transient — next poll retries */
+          }
+          liveInFlight.current = false;
+        }
+        if (statusRef.current === "listening") {
+          liveTimer.current = window.setTimeout(() => void poll(), 1200);
+        }
+      };
+      if (liveTranscriptionEnabled()) void poll();
     } catch (e) {
       setStatus("error");
       setError(
@@ -164,6 +204,7 @@ export default function App() {
 
   const finish = useCallback(async () => {
     if (statusRef.current !== "listening" || !recorderRef.current) return;
+    stopLivePolls();
     const target = targetRef.current;
     setStatus("thinking");
     try {
@@ -174,10 +215,11 @@ export default function App() {
       const minPeak = isTargetedEdit ? 0.09 : 0.06;
       if (durationMs < minDuration || peak < minPeak) {
         setTargetIndex(undefined);
+        setLiveText("");
         setStatus("idle");
         return;
       }
-            const wavAndPcm = await blobToWav(blob);
+      const wavAndPcm = await blobToWav(blob);
       // Speech check runs in parallel with the API call — no-speech results
       // are discarded when both complete
       const [result, speech] = await Promise.all([
@@ -187,7 +229,7 @@ export default function App() {
         }),
         analyzeSpeech(wavAndPcm.pcm),
       ]);
-      const minSpeechMs = target !== undefined ? 600 : 350;
+      const minSpeechMs = target !== undefined ? 600 : 500;
       if (speech.ok && speech.speechMs < minSpeechMs) {
         setTargetIndex(undefined);
         setStatus("idle");
@@ -200,13 +242,15 @@ export default function App() {
         setLines(next);
       }
       setTargetIndex(undefined);
+      setLiveText("");
       setStatus("idle");
     } catch (e) {
       setTargetIndex(undefined);
+      setLiveText("");
       setStatus("error");
       setError(e instanceof ConfigError ? e.message : (e as Error).message || "Something went wrong");
     }
-  }, [lines]);
+  }, [lines, stopLivePolls]);
 
   const undo = useCallback(() => {
     setPast((p) => {
@@ -307,6 +351,11 @@ export default function App() {
           </div>
         )}
 
+        {listening && liveText && (
+          <div className="pending-line" aria-live="polite">
+            {liveText}
+          </div>
+        )}
       </main>
 
       <footer className="footer">

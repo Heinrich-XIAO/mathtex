@@ -1,4 +1,5 @@
 import { SYSTEM_PROMPT } from "./prompt";
+import { pcmToWav } from "./wav";
 
 export type Mode = "append" | "append_lines" | "replace_line" | "delete_last" | "noop";
 
@@ -16,7 +17,9 @@ export interface CallContext {
 }
 
 const BASE = import.meta.env.VITE_API_BASE_URL || "/api";
-const MODEL = import.meta.env.VITE_MODEL || "google/gemini-3.5-flash-lite";
+const MODEL = import.meta.env.VITE_MODEL || "google/gemini-3.8-flash";
+// Live poll model (display-only partials during the hold)
+const LIVE_TRANSCRIBE_MODEL = String(import.meta.env.VITE_LIVE_TRANSCRIBE_MODEL || "");
 
 export class ConfigError extends Error {}
 
@@ -80,6 +83,32 @@ function parseResult(raw: string): DictationResult {
 }
 
 export async function dictate(
+  wav: ArrayBuffer,
+  ctx: CallContext,
+  opts?: { signal?: AbortSignal },
+): Promise<DictationResult> {
+  return dictateAudioLlm(wav, ctx, opts);
+}
+
+export const liveTranscriptionEnabled = (): boolean => LIVE_TRANSCRIBE_MODEL.length > 0;
+
+/** Live poll during hold: quick single-model transcription, no LLM. */
+export async function liveTranscribe(pcm: Float32Array): Promise<string> {
+  const res = await fetch(`${BASE}/transcribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      audioB64: arrayBufferToBase64(pcmToWav(pcm)),
+      consolidate: false,
+      models: [LIVE_TRANSCRIBE_MODEL],
+    }),
+  });
+  if (!res.ok) throw new Error(`live transcribe ${res.status}`);
+  const data = (await res.json()) as { transcript?: string };
+  return (data.transcript ?? "").trim();
+}
+
+async function dictateAudioLlm(
   wav: ArrayBuffer,
   ctx: CallContext,
   opts?: { signal?: AbortSignal },

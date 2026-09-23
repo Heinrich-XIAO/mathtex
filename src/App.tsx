@@ -238,7 +238,7 @@ export default function App() {
       const live = liveText.trim() && liveTranscriptionEnabled();
       const coverageOk =
         live &&
-        liveCoverageRef.current >= Math.max(600, durationMs * 0.85);
+        liveCoverageRef.current >= Math.max(600, durationMs - 600);
       let result: DictationResult | null = null;
       if (live) {
         try {

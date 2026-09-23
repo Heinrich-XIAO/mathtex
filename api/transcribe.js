@@ -65,7 +65,14 @@ export default async function handler(request) {
     `ASR models often garble spoken math symbols (e.g. "dy dx" may appear as "IDX", "i dx", "d x"). ` +
     `Merge them into the single most plausible reading (majority signal wins; use the phrase glossary to repair garbled symbols). ` +
     `Then produce the LaTeX. Output ONLY the standard JSON object in the required key order.`;
-  const userText = [list, contextText ?? "", mergeNote].filter(Boolean).join("\n\n");
+  const userText = [
+      mergeNote,
+      "",
+      "Candidate transcriptions of the audio:",
+      list,
+      "",
+      contextText ? `File context (for edit commands):\n${contextText}` : "",
+    ].filter(Boolean).join("\n");
 
   try {
     const res = await fetch(`${TARGET}/chat/completions`, {

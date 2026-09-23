@@ -1,5 +1,4 @@
 import { SYSTEM_PROMPT } from "./prompt";
-import { pcmToWav } from "./wav";
 
 export type Mode = "append" | "append_lines" | "replace_line" | "delete_last" | "noop";
 

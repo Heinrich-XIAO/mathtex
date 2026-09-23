@@ -102,7 +102,6 @@ export default function App() {
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState("");
   const [lines, setLines] = useState<Line[]>([]);
-  const [heard, setHeard] = useState("");
   const [targetIndex, setTargetIndex] = useState<number | undefined>(undefined);
   const targetRef = useRef<number | undefined>(undefined);
   useEffect(() => {
@@ -150,11 +149,6 @@ export default function App() {
       const result = await dictate(
         wav,
         { lines: lines.map((l) => ({ latex: l.latex })), targetIndex: target },
-        {
-          onProgress: (p) => {
-            if (p.transcript) setHeard(p.transcript);
-          },
-        },
       );
       setLines((prev) => applyResult(prev, result, target));
       setTargetIndex(undefined);
@@ -243,20 +237,7 @@ export default function App() {
           onPointerUp={() => void finish()}
           onContextMenu={(e) => e.preventDefault()}
           title={listening && targetIndex !== undefined ? `Editing line ${targetIndex + 1}` : undefined}
-        >
-          <MicGlyph size={15} />
-          {(listening || thinking) && (
-            <span className="pill-text">
-              {thinking
-                ? heard
-                  ? `“${heard}”`
-                  : "…"
-                : targetIndex !== undefined
-                  ? `editing line ${targetIndex + 1}`
-                  : "listening"}
-            </span>
-          )}
-        </button>
+        />
       </footer>
     </div>
   );

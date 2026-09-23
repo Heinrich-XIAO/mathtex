@@ -15,10 +15,6 @@ export interface CallContext {
   targetIndex?: number;
 }
 
-export interface ProgressEvent {
-  transcript?: string;
-}
-
 const BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 const MODEL = import.meta.env.VITE_MODEL || "google/gemini-3.8-flash";
 
@@ -86,10 +82,9 @@ function parseResult(raw: string): DictationResult {
 export async function dictate(
   wav: ArrayBuffer,
   ctx: CallContext,
-  opts?: { onProgress?: (p: ProgressEvent) => void; signal?: AbortSignal },
+  opts?: { signal?: AbortSignal },
 ): Promise<DictationResult> {
   mustConfig();
-  const onProgress = opts?.onProgress;
   const signal = opts?.signal;
   const b64 = arrayBufferToBase64(wav);
 
@@ -125,7 +120,7 @@ export async function dictate(
       (err as Error & { status?: number }).status = res.status;
       throw err;
     }
-    return readContent(res, onProgress);
+    return readContent(res);
   };
 
   let content: string;
@@ -172,10 +167,7 @@ export async function dictate(
   }
 }
 
-async function readContent(
-  res: Response,
-  onProgress?: (p: ProgressEvent) => void,
-): Promise<string> {
+async function readContent(res: Response): Promise<string> {
   if (!res.body) {
     const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
     return data.choices?.[0]?.message?.content ?? "";
@@ -185,16 +177,6 @@ async function readContent(
   const decoder = new TextDecoder();
   let buf = "";
   let content = "";
-
-  const extractTranscript = (raw: string) => {
-    const m = raw.match(/"transcript"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-    if (!m) return;
-    try {
-      onProgress?.({ transcript: JSON.parse(`"${m[1]}"`) as string });
-    } catch {
-      /* partial escape sequence — next chunk will fix it */
-    }
-  };
 
   while (true) {
     const { value, done } = await reader.read();
@@ -212,7 +194,6 @@ async function readContent(
         const delta = j.choices?.[0]?.delta?.content;
         if (typeof delta === "string" && delta) {
           content += delta;
-          extractTranscript(content);
         }
       } catch {
         /* partial SSE line */

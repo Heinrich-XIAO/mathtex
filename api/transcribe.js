@@ -21,7 +21,72 @@ export default async function handler(request) {
   } catch {
     return Response.json({ error: { message: "Invalid JSON body" } }, { status: 400 });
   }
-  const { audioB64, systemPrompt, contextText, models: requestedModels } = body ?? {};
+  const { audioB64, systemPrompt, contextText, models: requestedModels, consolidate, transcript } = body ?? {};
+
+  // Mode 1: live poll — quick single-model transcription, no LLM
+  if (consolidate === false && audioB64) {
+    const model = Array.isArray(requestedModels) && requestedModels.length > 0 ? requestedModels[0] : "fish-audio/transcribe-1";
+    const bytes = Uint8Array.from(atob(audioB64), (c) => c.charCodeAt(0));
+    const form = new FormData();
+    form.append("model", model);
+    form.append("file", new Blob([bytes]), "audio.wav");
+    try {
+      const res = await fetch(`${TARGET}/audio/transcriptions`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${KEY}` },
+        body: form,
+      });
+      const d = await res.json();
+      return Response.json({ transcript: (d.text ?? "").trim() });
+    } catch (e) {
+      return Response.json({ error: { message: String(e).slice(0, 200) } }, { status: 502 });
+    }
+  }
+
+  // Mode 2: consolidate-only — the transcript is already known (live flow at release)
+  if (!audioB64 && typeof transcript === "string" && transcript.trim()) {
+    if (!systemPrompt) {
+      return Response.json({ error: { message: "Missing systemPrompt" } }, { status: 400 });
+    }
+    const mergeNote =
+      `This is an ASR transcription of a spoken-math utterance by a student. ` +
+      `ASR models often garble spoken math symbols (e.g. "dy dx" may appear as "IDX", "i dx", "d x"). ` +
+      `Use the phrase glossary to repair garbled symbols, then produce the LaTeX. ` +
+      `Output ONLY the standard JSON object in the required key order.`;
+    const userText = [
+      "ASR transcription of the audio:",
+      JSON.stringify(transcript),
+      "",
+      contextText ? `File context (for edit commands):\n${contextText}` : "",
+      mergeNote,
+    ].filter(Boolean).join("\n");
+    try {
+      const res = await fetch(`${TARGET}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${KEY}` },
+        body: JSON.stringify({
+          model: CONSOLIDATOR,
+          temperature: 0,
+          max_tokens: 400,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userText },
+          ],
+        }),
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        return Response.json({ error: { message: `Consolidator ${res.status}: ${errText.slice(0, 150)}` } }, { status: 502 });
+      }
+      const data = await res.json();
+      const content = data.choices?.[0]?.message?.content ?? "";
+      return Response.json({ raw: content });
+    } catch (e) {
+      return Response.json({ error: { message: `Consolidator error: ${String(e).slice(0, 200)}` } }, { status: 502 });
+    }
+  }
+
   if (!audioB64) {
     return Response.json({ error: { message: "Missing audioB64" } }, { status: 400 });
   }

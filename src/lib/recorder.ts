@@ -6,6 +6,10 @@ export class PushToTalk {
   private chunks: Blob[] = [];
   private audioCtx: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
+  private captureNode: ScriptProcessorNode | null = null;
+  private mute: GainNode | null = null;
+  private source: MediaStreamAudioSourceNode | null = null;
+  private rawChunks: Float32Array[] = [];
   private raf = 0;
   private levelData: Uint8Array<ArrayBuffer> | null = null;
   private startedAt = 0;
@@ -21,7 +25,21 @@ export class PushToTalk {
     this.audioCtx = new AudioContext();
     this.analyser = this.audioCtx.createAnalyser();
     this.analyser.fftSize = 256;
-    this.audioCtx.createMediaStreamSource(this.stream).connect(this.analyser);
+    this.source = this.audioCtx.createMediaStreamSource(this.stream);
+    this.source.connect(this.analyser);
+
+    // Live PCM capture for streaming transcription snapshots
+    this.rawChunks = [];
+    this.captureNode = this.audioCtx.createScriptProcessor(4096, 1, 1);
+    this.captureNode.onaudioprocess = (e) => {
+      this.rawChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+    };
+    this.mute = this.audioCtx.createGain();
+    this.mute.gain.value = 0;
+    this.source.connect(this.captureNode);
+    this.captureNode.connect(this.mute);
+    this.mute.connect(this.audioCtx.destination);
+
     this.levelData = new Uint8Array(new ArrayBuffer(this.analyser.frequencyBinCount));
     this.startedAt = performance.now();
     this.peak = 0;
@@ -74,11 +92,33 @@ export class PushToTalk {
     });
   }
 
+  /** Live PCM snapshot (mono 16 kHz) without stopping the recording —
+   * powers incremental transcription while the user is still speaking. */
+  snapshotPcm(): { pcm: Float32Array; durationMs: number; peak: number } {
+    const total = this.rawChunks.reduce((n, c) => n + c.length, 0);
+    const native = new Float32Array(total);
+    let off = 0;
+    for (const c of this.rawChunks) {
+      native.set(c, off);
+      off += c.length;
+    }
+    const inRate = this.audioCtx?.sampleRate ?? 48000;
+    const ratio = inRate / 16000;
+    const outLen = Math.max(1, Math.floor(native.length / ratio));
+    const pcm = new Float32Array(outLen);
+    for (let i = 0; i < outLen; i++) pcm[i] = native[Math.floor(i * ratio)];
+    return { pcm, durationMs: performance.now() - this.startedAt, peak: this.peak };
+  }
+
   private cleanup(): void {
     cancelAnimationFrame(this.raf);
     this.raf = 0;
     this.stream?.getTracks().forEach((t) => t.stop());
     void this.audioCtx?.close();
+    this.captureNode = null;
+    this.mute = null;
+    this.source = null;
+    this.rawChunks = [];
     this.stream = null;
     this.recorder = null;
     this.chunks = [];

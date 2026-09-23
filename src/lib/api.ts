@@ -1,4 +1,5 @@
 import { SYSTEM_PROMPT } from "./prompt";
+import { pcmToWav } from "./wav";
 
 export type Mode = "append" | "append_lines" | "replace_line" | "delete_last" | "noop";
 
@@ -24,6 +25,7 @@ const TRANSCRIBE_MODELS = String(import.meta.env.VITE_TRANSCRIBE_MODELS || "")
   .split(",")
   .map((s: string) => s.trim())
   .filter(Boolean);
+const LIVE_TRANSCRIBE_MODEL = String(import.meta.env.VITE_LIVE_TRANSCRIBE_MODEL || "");
 
 export class ConfigError extends Error {}
 
@@ -99,6 +101,45 @@ export async function dictate(
     }
   }
   return dictateAudioLlm(wav, ctx, opts);
+}
+
+export const liveTranscriptionEnabled = (): boolean => LIVE_TRANSCRIBE_MODEL.length > 0;
+
+/** Live poll during hold: quick single-model transcription, no LLM. */
+export async function liveTranscribe(pcm: Float32Array): Promise<string> {
+  const res = await fetch(`${BASE}/transcribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      audioB64: arrayBufferToBase64(pcmToWav(pcm)),
+      consolidate: false,
+      models: [LIVE_TRANSCRIBE_MODEL],
+    }),
+  });
+  if (!res.ok) throw new Error(`live transcribe ${res.status}`);
+  const data = (await res.json()) as { transcript?: string };
+  return (data.transcript ?? "").trim();
+}
+
+/** Release pass: transcript is already known — text→LaTeX only. */
+export async function consolidateTranscript(
+  transcript: string,
+  ctx: CallContext,
+): Promise<DictationResult> {
+  const res = await fetch(`${BASE}/transcribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      transcript,
+      systemPrompt: SYSTEM_PROMPT,
+      contextText: contextText(ctx),
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`consolidate ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  }
+  const data = (await res.json()) as { raw?: string };
+  return parseResult(data.raw ?? "");
 }
 
 async function dictateEnsemble(

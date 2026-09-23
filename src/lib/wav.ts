@@ -15,6 +15,11 @@ export async function blobToWav(blob: Blob): Promise<WavAndPcm> {
   }
 }
 
+/** Encode 16 kHz mono PCM as a WAV container (for live-poll uploads). */
+export function pcmToWav(pcm: Float32Array): ArrayBuffer {
+  return encodeWav(pcm, 16000);
+}
+
 function mono16k(audio: AudioBuffer): Float32Array {
   const mixed = new Float32Array(audio.length);
   for (let c = 0; c < audio.numberOfChannels; c++) {

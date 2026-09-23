@@ -46,28 +46,7 @@ body {
   overflow-y: auto;
 }
 
-/* While listening, existing equations step back so the incoming line leads */
-.app.listening .line {
-  opacity: 0.45;
-  transition: opacity 250ms;
-}
 
-.ghost-line {
-  text-align: center;
-  color: var(--muted);
-  font-style: italic;
-  font-size: 1rem;
-  padding: 10px 24px;
-  animation: ghostIn 250ms ease-out;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-@keyframes ghostIn {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: none; }
-}
 
 .placeholder {
   text-align: center;

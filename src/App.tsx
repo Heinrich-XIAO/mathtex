@@ -3,14 +3,7 @@ import katex from "katex";
 import { PushToTalk } from "./lib/recorder";
 import { blobToWav } from "./lib/wav";
 import { analyzeSpeech, warmVad } from "./lib/vad";
-import {
-  dictate,
-  consolidateTranscript,
-  liveTranscribe,
-  liveTranscriptionEnabled,
-  ConfigError,
-  type DictationResult,
-} from "./lib/api";
+import { dictate, ConfigError, type DictationResult } from "./lib/api";
 
 type Status = "idle" | "listening" | "thinking" | "error";
 
@@ -133,10 +126,6 @@ export default function App() {
   const [past, setPast] = useState<Line[][]>([]);
   const [future, setFuture] = useState<Line[][]>([]);
   const [targetIndex, setTargetIndex] = useState<number | undefined>(undefined);
-  const [liveText, setLiveText] = useState("");
-  const liveTimer = useRef<number | null>(null);
-  const liveInFlight = useRef(false);
-  const liveCoverageRef = useRef(0); // ms of audio covered by the last completed poll
   const targetRef = useRef<number | undefined>(undefined);
   useEffect(() => {
     targetRef.current = targetIndex;
@@ -147,19 +136,9 @@ export default function App() {
     statusRef.current = status;
   }, [status]);
 
-  const stopLivePolls = useCallback(() => {
-    if (liveTimer.current !== null) {
-      window.clearTimeout(liveTimer.current);
-      liveTimer.current = null;
-    }
-    liveInFlight.current = false;
-  }, []);
-
   const start = useCallback(async () => {
     if (statusRef.current !== "idle") return;
     setError("");
-    setLiveText("");
-    liveCoverageRef.current = 0;
     // Warm the serverless function while the user is speaking (fire-and-forget)
     void fetch("/api/chat/completions", {
       method: "POST",
@@ -171,34 +150,6 @@ export default function App() {
     try {
       await ptt.start();
       setStatus("listening");
-      // Live transcription loop: re-transcribe the growing audio every 1.2s.
-      // First poll is scheduled (not run inline) so statusRef has settled.
-      const poll = async () => {
-        const rec = recorderRef.current;
-        if (!rec || statusRef.current !== "listening") return;
-        if (!liveInFlight.current) {
-          liveInFlight.current = true;
-          try {
-            const { pcm, durationMs } = rec.snapshotPcm();
-            if (durationMs > 700) {
-              const text = await liveTranscribe(pcm);
-              if (statusRef.current === "listening" && text) {
-                liveCoverageRef.current = durationMs;
-                setLiveText(text);
-              }
-            }
-          } catch {
-            /* transient — next poll retries */
-          }
-          liveInFlight.current = false;
-        }
-        if (statusRef.current === "listening") {
-          liveTimer.current = window.setTimeout(() => void poll(), 1200);
-        }
-      };
-      if (liveTranscriptionEnabled()) {
-        liveTimer.current = window.setTimeout(() => void poll(), 1200);
-      }
     } catch (e) {
       setStatus("error");
       setError(
@@ -213,7 +164,6 @@ export default function App() {
 
   const finish = useCallback(async () => {
     if (statusRef.current !== "listening" || !recorderRef.current) return;
-    stopLivePolls();
     const target = targetRef.current;
     setStatus("thinking");
     try {
@@ -224,38 +174,19 @@ export default function App() {
       const minPeak = isTargetedEdit ? 0.09 : 0.06;
       if (durationMs < minDuration || peak < minPeak) {
         setTargetIndex(undefined);
-        setLiveText("");
         setStatus("idle");
         return;
       }
             const wavAndPcm = await blobToWav(blob);
-      const ctx = { lines: lines.map((l) => ({ latex: l.latex })), targetIndex: target };
-      // Live flow: if the last poll covered (nearly) the whole hold, its
-      // transcript is complete — text→LaTeX only (~0.4s). Otherwise do one
-      // final full-clip transcription first (~0.8s total). Any failure in the
-      // fast path falls back to the full audio pipeline.
-      const speechPromise = analyzeSpeech(wavAndPcm.pcm);
-      const live = liveText.trim() && liveTranscriptionEnabled();
-      const coverageOk =
-        live &&
-        liveCoverageRef.current >= Math.max(600, durationMs - 600);
-      let result: DictationResult | null = null;
-      if (live) {
-        try {
-          if (coverageOk) {
-            result = await consolidateTranscript(liveText.trim(), ctx);
-          } else {
-            const fullText = await liveTranscribe(wavAndPcm.pcm);
-            if (fullText) result = await consolidateTranscript(fullText, ctx);
-          }
-        } catch {
-          result = null; // fall back below
-        }
-      }
-      if (!result) {
-        result = await dictate(wavAndPcm.wav, ctx);
-      }
-      const speech = await speechPromise;
+      // Speech check runs in parallel with the API call — no-speech results
+      // are discarded when both complete
+      const [result, speech] = await Promise.all([
+        dictate(wavAndPcm.wav, {
+          lines: lines.map((l) => ({ latex: l.latex })),
+          targetIndex: target,
+        }),
+        analyzeSpeech(wavAndPcm.pcm),
+      ]);
       const minSpeechMs = target !== undefined ? 600 : 350;
       if (speech.ok && speech.speechMs < minSpeechMs) {
         setTargetIndex(undefined);
@@ -269,15 +200,13 @@ export default function App() {
         setLines(next);
       }
       setTargetIndex(undefined);
-      setLiveText("");
       setStatus("idle");
     } catch (e) {
       setTargetIndex(undefined);
-      setLiveText("");
       setStatus("error");
       setError(e instanceof ConfigError ? e.message : (e as Error).message || "Something went wrong");
     }
-  }, [lines, liveText, stopLivePolls]);
+  }, [lines]);
 
   const undo = useCallback(() => {
     setPast((p) => {
@@ -378,11 +307,6 @@ export default function App() {
           </div>
         )}
 
-        {(listening || thinking) && liveText && (
-          <div className="ghost-line" aria-live="polite">
-            “{liveText}”
-          </div>
-        )}
       </main>
 
       <footer className="footer">

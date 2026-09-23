@@ -256,7 +256,7 @@ export default function App() {
         result = await dictate(wavAndPcm.wav, ctx);
       }
       const speech = await speechPromise;
-      const minSpeechMs = target !== undefined ? 600 : 500;
+      const minSpeechMs = target !== undefined ? 600 : 350;
       if (speech.ok && speech.speechMs < minSpeechMs) {
         setTargetIndex(undefined);
         setStatus("idle");

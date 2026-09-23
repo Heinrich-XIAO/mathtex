@@ -157,6 +157,7 @@ export default function App() {
     if (statusRef.current !== "idle") return;
     setError("");
     setLiveText("");
+    setLiveText("");
     // Warm the serverless function while the user is speaking (fire-and-forget)
     void fetch("/api/chat/completions", {
       method: "POST",

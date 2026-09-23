@@ -15,31 +15,16 @@ interface Line {
 
 const LOW_CONFIDENCE = 0.7;
 
-async function copyText(text: string): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand("copy");
-    ta.remove();
-  }
-}
-
 function applyResult(lines: Line[], r: DictationResult, targetIndex?: number): Line[] {
   switch (r.mode) {
     case "append":
     case "append_lines": {
       if (r.lines.length === 0) return lines;
-      const newLines = r.lines.map((latex, i) => ({
+      const newLines = r.lines.map((latex) => ({
         latex,
-        transcript: i === 0 ? r.transcript : "",
+        transcript: r.transcript,
         confidence: r.confidence,
-        note: i === 0 ? r.note : "",
+        note: r.note,
       }));
       return [...lines, ...newLines];
     }
@@ -65,9 +50,9 @@ function applyResult(lines: Line[], r: DictationResult, targetIndex?: number): L
   }
 }
 
-function MicGlyph() {
+function MicGlyph({ size = 16 }: { size?: number }) {
   return (
-    <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden>
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="currentColor" aria-hidden>
       <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z" />
     </svg>
   );
@@ -76,13 +61,11 @@ function MicGlyph() {
 function LineView({
   line,
   targeted,
-  onCopy,
   onMicDown,
   onMicUp,
 }: {
   line: Line;
   targeted: boolean;
-  onCopy: () => void;
   onMicDown: () => void;
   onMicUp: () => void;
 }) {
@@ -92,31 +75,25 @@ function LineView({
   );
   const low = line.confidence < LOW_CONFIDENCE;
   return (
-    <div className={`line ${low ? "low" : ""} ${targeted ? "targeted" : ""}`}>
+    <div className={`line ${low ? "low" : ""} ${targeted ? "targeted" : ""}`} title={low ? line.note : undefined}>
       <div className="latex" dangerouslySetInnerHTML={{ __html: html }} />
-      <div className="meta">
-        <span className={`dot ${low ? "amber" : "green"}`} />
-        {line.transcript && <span className="transcript">“{line.transcript}”</span>}
-        {low && line.note && <span className="note">{line.note}</span>}
-        <button
-          className="line-mic"
-          title="Hold to edit this line by voice"
-          onPointerDown={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            onMicDown();
-          }}
-          onPointerUp={(e) => {
-            e.stopPropagation();
-            onMicUp();
-          }}
-        >
-          <MicGlyph />
-        </button>
-        <button className="copy" onClick={onCopy} title="Copy LaTeX">
-          copy
-        </button>
-      </div>
+      <button
+        className="line-mic"
+        title="Hold to edit this line by voice"
+        onPointerDown={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          e.currentTarget.setPointerCapture(e.pointerId);
+          onMicDown();
+        }}
+        onPointerUp={(e) => {
+          e.stopPropagation();
+          onMicUp();
+        }}
+        onContextMenu={(e) => e.preventDefault()}
+      >
+        <MicGlyph />
+      </button>
     </div>
   );
 }
@@ -124,7 +101,6 @@ function LineView({
 export default function App() {
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState("");
-  const [level, setLevel] = useState(0);
   const [lines, setLines] = useState<Line[]>([]);
   const [heard, setHeard] = useState("");
   const [targetIndex, setTargetIndex] = useState<number | undefined>(undefined);
@@ -149,7 +125,6 @@ export default function App() {
       body: "{}",
     }).catch(() => {});
     const ptt = recorderRef.current ?? (recorderRef.current = new PushToTalk());
-    ptt.onLevel = setLevel;
     try {
       await ptt.start();
       setStatus("listening");
@@ -157,7 +132,7 @@ export default function App() {
       setStatus("error");
       setError(
         typeof navigator.mediaDevices === "undefined"
-          ? "Mic API unavailable — this app needs a secure context. Open it via https:// or localhost (not plain http:// on a LAN IP)."
+          ? "Mic API unavailable — open via https:// or localhost."
           : e instanceof DOMException && e.name === "NotAllowedError"
             ? "Microphone permission denied — allow mic access and try again."
             : `Could not start recording: ${(e as Error).message}`,
@@ -217,11 +192,6 @@ export default function App() {
 
   return (
     <div className="app">
-      <header className="header">
-        <h1>MathTex</h1>
-        <p className="tagline">say it, see it</p>
-      </header>
-
       <main className="stage">
         {error && (
           <div className="error-banner" role="alert">
@@ -240,12 +210,8 @@ export default function App() {
 
         {lines.length === 0 ? (
           <div className="placeholder">
-            <p className="hero">
-              Hold <kbd>space</kbd> — or hold the mic — and just say the math.
-            </p>
-            <p className="example">
-              e.g. <span className="spoken">“dy dx equals x squared times x cubed”</span>
-            </p>
+            <p>Hold the pill and say the math.</p>
+            <p className="example">e.g. “dy dx equals x squared times x cubed”</p>
           </div>
         ) : (
           <div className="lines">
@@ -254,7 +220,6 @@ export default function App() {
                 key={i}
                 line={line}
                 targeted={targetIndex === i}
-                onCopy={() => void copyText(line.latex)}
                 onMicDown={() => {
                   setTargetIndex(i);
                   void start();
@@ -267,35 +232,31 @@ export default function App() {
       </main>
 
       <footer className="footer">
-        <div className="meter">
-          <div className="fill" style={{ transform: `scaleX(${level})` }} />
-        </div>
         <button
-          className={`mic ${listening ? "on" : ""}`}
+          className={`pill ${listening ? "listening" : ""} ${thinking ? "thinking" : ""}`}
           disabled={thinking}
           onPointerDown={(e) => {
             e.preventDefault();
+            e.currentTarget.setPointerCapture(e.pointerId);
             void start();
           }}
           onPointerUp={() => void finish()}
-          onPointerLeave={() => void finish()}
-          title="Hold to talk"
+          onContextMenu={(e) => e.preventDefault()}
+          title={listening && targetIndex !== undefined ? `Editing line ${targetIndex + 1}` : undefined}
         >
-          <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor" aria-hidden>
-            <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z" />
-          </svg>
+          <MicGlyph size={15} />
+          {(listening || thinking) && (
+            <span className="pill-text">
+              {thinking
+                ? heard
+                  ? `“${heard}”`
+                  : "…"
+                : targetIndex !== undefined
+                  ? `editing line ${targetIndex + 1}`
+                  : "listening"}
+            </span>
+          )}
         </button>
-        <div className="status">
-          {thinking
-            ? heard
-              ? `heard: “${heard}”`
-              : "thinking…"
-            : listening
-              ? targetIndex !== undefined
-                ? `editing line ${targetIndex + 1} — release to apply`
-                : "listening — release to send"
-              : "hold space to talk"}
-        </div>
       </footer>
     </div>
   );

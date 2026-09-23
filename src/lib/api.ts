@@ -17,6 +17,13 @@ export interface CallContext {
 
 const BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 const MODEL = import.meta.env.VITE_MODEL || "google/gemini-3.8-flash";
+// Comma-separated list enables the ensemble path: fan out to these ASR
+// models server-side, consolidate transcripts with the LLM, fall back to
+// the single audio-LLM path on any failure.
+const TRANSCRIBE_MODELS = (import.meta.env.VITE_TRANSCRIBE_MODELS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 export class ConfigError extends Error {}
 
@@ -80,6 +87,47 @@ function parseResult(raw: string): DictationResult {
 }
 
 export async function dictate(
+  wav: ArrayBuffer,
+  ctx: CallContext,
+  opts?: { signal?: AbortSignal },
+): Promise<DictationResult> {
+  if (TRANSCRIBE_MODELS.length > 0) {
+    try {
+      return await dictateEnsemble(wav, ctx, opts);
+    } catch {
+      /* fall through to the single audio-LLM path */
+    }
+  }
+  return dictateAudioLlm(wav, ctx, opts);
+}
+
+async function dictateEnsemble(
+  wav: ArrayBuffer,
+  ctx: CallContext,
+  opts?: { signal?: AbortSignal },
+): Promise<DictationResult> {
+  const res = await fetch(`${BASE}/transcribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      audioB64: arrayBufferToBase64(wav),
+      systemPrompt: SYSTEM_PROMPT,
+      contextText: contextText(ctx),
+      models: TRANSCRIBE_MODELS,
+    }),
+    signal: opts?.signal,
+  });
+  if (!res.ok) {
+    throw new Error(`transcribe API ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  }
+  const data = (await res.json()) as { raw?: string; mode?: string };
+  if (data.mode === "noop") {
+    return { mode: "noop", transcript: "", lines: [], confidence: 0, note: "no speech detected by any transcriber" };
+  }
+  return parseResult(data.raw ?? "");
+}
+
+async function dictateAudioLlm(
   wav: ArrayBuffer,
   ctx: CallContext,
   opts?: { signal?: AbortSignal },

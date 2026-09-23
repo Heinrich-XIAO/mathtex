@@ -58,6 +58,26 @@ function MicGlyph({ size = 16 }: { size?: number }) {
   );
 }
 
+function ArrowGlyph({ mirrored = false }: { mirrored?: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={15}
+      height={15}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      style={mirrored ? { transform: "scaleX(-1)" } : undefined}
+    >
+      <polyline points="9 14 4 9 9 4" />
+      <path d="M20 20v-7a4 4 0 0 0-4-4H4" />
+    </svg>
+  );
+}
+
 function LineView({
   line,
   targeted,
@@ -102,6 +122,8 @@ export default function App() {
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState("");
   const [lines, setLines] = useState<Line[]>([]);
+  const [past, setPast] = useState<Line[][]>([]);
+  const [future, setFuture] = useState<Line[][]>([]);
   const [targetIndex, setTargetIndex] = useState<number | undefined>(undefined);
   const targetRef = useRef<number | undefined>(undefined);
   useEffect(() => {
@@ -143,13 +165,24 @@ export default function App() {
     const target = targetRef.current;
     setStatus("thinking");
     try {
-      const blob = await recorderRef.current.stop();
+      const { blob, durationMs, peak } = await recorderRef.current.stop();
+      // Blank recording (tap, click, silence): discard without calling the API
+      if (durationMs < 400 || peak < 0.045) {
+        setTargetIndex(undefined);
+        setStatus("idle");
+        return;
+      }
       const wav = await blobToWav(blob);
       const result = await dictate(
         wav,
         { lines: lines.map((l) => ({ latex: l.latex })), targetIndex: target },
       );
-      setLines((prev) => applyResult(prev, result, target));
+      const next = applyResult(lines, result, target);
+      if (next !== lines) {
+        setPast((p) => [...p.slice(-49), lines]);
+        setFuture([]);
+        setLines(next);
+      }
       setTargetIndex(undefined);
       setStatus("idle");
     } catch (e) {
@@ -159,9 +192,44 @@ export default function App() {
     }
   }, [lines]);
 
+  const undo = useCallback(() => {
+    setPast((p) => {
+      if (p.length === 0) return p;
+      const prev = p[p.length - 1];
+      setFuture((f) => [lines, ...f.slice(0, 49)]);
+      setLines(prev);
+      return p.slice(0, -1);
+    });
+  }, [lines]);
+
+  const redo = useCallback(() => {
+    setFuture((f) => {
+      if (f.length === 0) return f;
+      const next = f[0];
+      setPast((p) => [...p.slice(-49), lines]);
+      setLines(next);
+      return f.slice(1);
+    });
+  }, [lines]);
+
   useEffect(() => {
     const isSpace = (e: KeyboardEvent) => e.code === "Space" || e.key === " ";
+    const isUndo = (e: KeyboardEvent) =>
+      (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.shiftKey;
+    const isRedo = (e: KeyboardEvent) =>
+      ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") ||
+      ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "z");
     const onKeyDown = (e: KeyboardEvent) => {
+      if (isUndo(e)) {
+        e.preventDefault();
+        undo();
+        return;
+      }
+      if (isRedo(e)) {
+        e.preventDefault();
+        redo();
+        return;
+      }
       if (!isSpace(e) || e.repeat) return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
@@ -178,7 +246,7 @@ export default function App() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [start, finish]);
+  }, [start, finish, undo, redo]);
 
   const listening = status === "listening";
   const thinking = status === "thinking";
@@ -225,6 +293,14 @@ export default function App() {
       </main>
 
       <footer className="footer">
+        <div className="history">
+          <button className="ghost" disabled={past.length === 0} onClick={undo} title="Undo (Ctrl+Z)">
+            <ArrowGlyph />
+          </button>
+          <button className="ghost" disabled={future.length === 0} onClick={redo} title="Redo (Ctrl+Shift+Z)">
+            <ArrowGlyph mirrored />
+          </button>
+        </div>
         <button
           className={`pill ${listening ? "listening" : ""} ${thinking ? "thinking" : ""}`}
           disabled={thinking}

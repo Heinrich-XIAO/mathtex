@@ -8,6 +8,8 @@ export class PushToTalk {
   private analyser: AnalyserNode | null = null;
   private raf = 0;
   private levelData: Uint8Array<ArrayBuffer> | null = null;
+  private startedAt = 0;
+  private peak = 0;
 
   onLevel: LevelListener | null = null;
 
@@ -21,6 +23,8 @@ export class PushToTalk {
     this.analyser.fftSize = 256;
     this.audioCtx.createMediaStreamSource(this.stream).connect(this.analyser);
     this.levelData = new Uint8Array(new ArrayBuffer(this.analyser.frequencyBinCount));
+    this.startedAt = performance.now();
+    this.peak = 0;
     const tick = () => {
       if (!this.analyser || !this.levelData) return;
       this.analyser.getByteTimeDomainData(this.levelData);
@@ -29,7 +33,9 @@ export class PushToTalk {
         const dev = this.levelData[i] - 128;
         sum += dev * dev;
       }
-      this.onLevel?.(Math.min(1, Math.sqrt(sum / this.levelData.length) / 40));
+      const level = Math.min(1, Math.sqrt(sum / this.levelData.length) / 40);
+      if (level > this.peak) this.peak = level;
+      this.onLevel?.(level);
       this.raf = requestAnimationFrame(tick);
     };
     this.raf = requestAnimationFrame(tick);
@@ -47,7 +53,7 @@ export class PushToTalk {
     this.recorder.start();
   }
 
-  stop(): Promise<Blob> {
+  stop(): Promise<{ blob: Blob; durationMs: number; peak: number }> {
     return new Promise((resolve, reject) => {
       const rec = this.recorder;
       if (!rec) {
@@ -59,8 +65,10 @@ export class PushToTalk {
         const blob = new Blob(this.chunks, {
           type: rec.mimeType || "audio/webm",
         });
+        const durationMs = performance.now() - this.startedAt;
+        const peak = this.peak;
         this.cleanup();
-        resolve(blob);
+        resolve({ blob, durationMs, peak });
       };
       rec.stop();
     });

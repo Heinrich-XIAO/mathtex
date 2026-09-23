@@ -20,6 +20,8 @@ Emit the keys in exactly this order: mode, transcript, latex, confidence, note.
 - "transcript": what the user actually said, verbatim.
 - "confidence": how sure you are the LaTeX matches the spoken math.
 
+EMPTY / NOISE AUDIO (critical): if the audio contains no speech, only a tap, a click, silence, or unintelligible noise, you MUST output mode "noop" with empty latex and a short note. NEVER modify, replace, or delete any line based on empty or unclear audio — doing nothing is always safer than a wrong edit.
+
 PHRASE GLOSSARY (spoken -> LaTeX):
 - "x squared" / "x cubed" / "x to the y" -> x^2 / x^3 / x^{y}
 - "e to the x" -> e^{x}

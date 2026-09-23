@@ -151,9 +151,42 @@ body {
 }
 
 .footer {
+  position: relative;
   display: flex;
   justify-content: center;
   padding: 10px 0 30px;
+}
+
+/* Bottom-left ghost undo/redo */
+.history {
+  position: absolute;
+  left: 6px;
+  bottom: 26px;
+  display: flex;
+  gap: 4px;
+}
+
+.ghost {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  opacity: 0.25;
+  padding: 7px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: opacity 120ms;
+}
+
+.ghost:not(:disabled):hover {
+  opacity: 0.9;
+  color: var(--text);
+}
+
+.ghost:disabled {
+  cursor: default;
+  opacity: 0.12;
 }
 
 /* Dynamic-island pill: flat, dark, iconless; glows while active */

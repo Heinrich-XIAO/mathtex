@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import katex from "katex";
 import { PushToTalk } from "./lib/recorder";
 import { blobToWav } from "./lib/wav";
+import { analyzeSpeech } from "./lib/vad";
 import { dictate, ConfigError, type DictationResult } from "./lib/api";
 
 type Status = "idle" | "listening" | "thinking" | "error";
@@ -175,11 +176,22 @@ export default function App() {
         setStatus("idle");
         return;
       }
-      const wav = await blobToWav(blob);
-      const result = await dictate(
-        wav,
-        { lines: lines.map((l) => ({ latex: l.latex })), targetIndex: target },
-      );
+      const wavAndPcm = await blobToWav(blob);
+      // Speech check runs in parallel with the API call — if there is no
+      // speech, the model's result is discarded when both complete
+      const [result, speech] = await Promise.all([
+        dictate(wavAndPcm.wav, {
+          lines: lines.map((l) => ({ latex: l.latex })),
+          targetIndex: target,
+        }),
+        analyzeSpeech(wavAndPcm.pcm),
+      ]);
+      const minSpeechMs = target !== undefined ? 600 : 500;
+      if (speech.ok && speech.speechMs < minSpeechMs) {
+        setTargetIndex(undefined);
+        setStatus("idle");
+        return;
+      }
       const next = applyResult(lines, result, target);
       if (next !== lines) {
         setPast((p) => [...p.slice(-49), lines]);

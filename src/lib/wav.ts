@@ -1,22 +1,36 @@
-export async function blobToWav(blob: Blob): Promise<ArrayBuffer> {
+export interface WavAndPcm {
+  wav: ArrayBuffer;
+  pcm: Float32Array;
+}
+
+export async function blobToWav(blob: Blob): Promise<WavAndPcm> {
   const raw = await blob.arrayBuffer();
   const ctx = new AudioContext();
   try {
     const audio = await ctx.decodeAudioData(raw);
-    return encodeWav(audio, 16000);
+    const pcm = mono16k(audio);
+    return { wav: encodeWav(pcm, 16000), pcm };
   } finally {
     void ctx.close();
   }
 }
 
-function encodeWav(audio: AudioBuffer, targetRate: number): ArrayBuffer {
-  const src = new Float32Array(audio.length);
+function mono16k(audio: AudioBuffer): Float32Array {
+  const mixed = new Float32Array(audio.length);
   for (let c = 0; c < audio.numberOfChannels; c++) {
     const d = audio.getChannelData(c);
-    for (let i = 0; i < d.length; i++) src[i] += d[i] / audio.numberOfChannels;
+    for (let i = 0; i < d.length; i++) mixed[i] += d[i] / audio.numberOfChannels;
   }
+  const ratio = audio.sampleRate / 16000;
+  const outLen = Math.max(1, Math.floor(mixed.length / ratio));
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) out[i] = mixed[Math.floor(i * ratio)];
+  return out;
+}
 
-  const ratio = audio.sampleRate / targetRate;
+function encodeWav(mixed: Float32Array, targetRate: number): ArrayBuffer {
+  const src = mixed;
+  const ratio = 16000 / targetRate;
   const outLen = Math.max(1, Math.floor(src.length / ratio));
   const pcm = new Int16Array(outLen);
   for (let i = 0; i < outLen; i++) {

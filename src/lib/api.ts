@@ -20,9 +20,9 @@ const MODEL = import.meta.env.VITE_MODEL || "google/gemini-3.8-flash";
 // Comma-separated list enables the ensemble path: fan out to these ASR
 // models server-side, consolidate transcripts with the LLM, fall back to
 // the single audio-LLM path on any failure.
-const TRANSCRIBE_MODELS = (import.meta.env.VITE_TRANSCRIBE_MODELS || "")
+const TRANSCRIBE_MODELS = String(import.meta.env.VITE_TRANSCRIBE_MODELS || "")
   .split(",")
-  .map((s) => s.trim())
+  .map((s: string) => s.trim())
   .filter(Boolean);
 
 export class ConfigError extends Error {}

@@ -64,7 +64,8 @@ export default async function handler(request) {
     `These are ${good.length} independent ASR transcriptions of the SAME spoken-math utterance by a student. ` +
     `ASR models often garble spoken math symbols (e.g. "dy dx" may appear as "IDX", "i dx", "d x"). ` +
     `Merge them into the single most plausible reading (majority signal wins; use the phrase glossary to repair garbled symbols). ` +
-    `Output ONLY the standard JSON object in the required key order.`;
+    `Then produce the LaTeX. Output ONLY the standard JSON object in the required key order.`;
+  const userText = [list, contextText ?? "", mergeNote].filter(Boolean).join("\n\n");
 
   try {
     const res = await fetch(`${TARGET}/chat/completions`, {
@@ -77,7 +78,7 @@ export default async function handler(request) {
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: systemPrompt },
-          { role: "user", content: `${list}\n\n${contextText ?? ""}`.trim() + `\n\nMerge the candidate transcriptions and produce the JSON object.` },
+          { role: "user", content: userText },
         ],
       }),
     });

@@ -190,7 +190,10 @@ export default function App() {
           liveTimer.current = window.setTimeout(() => void poll(), 1200);
         }
       };
-      if (liveTranscriptionEnabled()) void poll();
+      if (liveTranscriptionEnabled()) {
+        // First poll scheduled (not run inline): statusRef hasn't settled yet
+        liveTimer.current = window.setTimeout(() => void poll(), 1200);
+      }
     } catch (e) {
       setStatus("error");
       setError(

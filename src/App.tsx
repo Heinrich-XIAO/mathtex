@@ -225,14 +225,22 @@ export default function App() {
       }
       const wavAndPcm = await blobToWav(blob);
       const ctx = { lines: lines.map((l) => ({ latex: l.latex })), targetIndex: target };
-      // Live flow: transcript is already known — only the text→LaTeX pass runs
+      // Live flow: transcript is already known — only the text→LaTeX pass runs.
+      // Any failure in the fast path falls back to the full audio pipeline.
+      const speechPromise = analyzeSpeech(wavAndPcm.pcm);
       const live = liveText.trim() && liveTranscriptionEnabled();
-      const [result, speech] = await Promise.all([
-        live
-          ? consolidateTranscript(liveText.trim(), ctx)
-          : dictate(wavAndPcm.wav, ctx),
-        analyzeSpeech(wavAndPcm.pcm),
-      ]);
+      let result: DictationResult | null = null;
+      if (live) {
+        try {
+          result = await consolidateTranscript(liveText.trim(), ctx);
+        } catch {
+          result = null; // fall back below
+        }
+      }
+      if (!result) {
+        result = await dictate(wavAndPcm.wav, ctx);
+      }
+      const speech = await speechPromise;
       const minSpeechMs = target !== undefined ? 600 : 500;
       if (speech.ok && speech.speechMs < minSpeechMs) {
         setTargetIndex(undefined);

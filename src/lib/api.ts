@@ -92,20 +92,33 @@ export async function dictate(
 
 export const liveTranscriptionEnabled = (): boolean => LIVE_TRANSCRIBE_MODEL.length > 0;
 
-/** Live poll during hold: quick single-model transcription, no LLM. */
-export async function liveTranscribe(pcm: Float32Array): Promise<string> {
+/** Live poll during hold: transcribe the clip, convert to LaTeX, return both. */
+export async function liveConvert(
+  pcm: Float32Array,
+  ctx: CallContext,
+): Promise<{ transcript: string; result: DictationResult | null }> {
   const res = await fetch(`${BASE}/transcribe`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       audioB64: arrayBufferToBase64(pcmToWav(pcm)),
-      consolidate: false,
-      models: [LIVE_TRANSCRIBE_MODEL],
+      systemPrompt: SYSTEM_PROMPT,
+      contextText: contextText(ctx),
+      model: LIVE_TRANSCRIBE_MODEL || undefined,
     }),
   });
-  if (!res.ok) throw new Error(`live transcribe ${res.status}`);
-  const data = (await res.json()) as { transcript?: string };
-  return (data.transcript ?? "").trim();
+  if (!res.ok) throw new Error(`live convert ${res.status}`);
+  const data = (await res.json()) as { transcript?: string; raw?: string };
+  const transcript = (data.transcript ?? "").trim();
+  let result: DictationResult | null = null;
+  if (data.raw) {
+    try {
+      result = parseResult(data.raw);
+    } catch {
+      result = null;
+    }
+  }
+  return { transcript, result };
 }
 
 async function dictateAudioLlm(

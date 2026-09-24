@@ -52,20 +52,14 @@ body {
   transition: opacity 250ms;
 }
 
-/* Live partial: dotted pending line where the next equation will land */
+/* Provisional equation: faded white while in progress */
+.pending-line .latex {
+  opacity: 0.45;
+  transition: opacity 250ms;
+}
+
 .pending-line {
-  text-align: center;
-  color: var(--muted);
-  font-size: 1.05rem;
-  padding: 10px 24px;
-  text-decoration: underline dotted;
-  text-decoration-color: color-mix(in srgb, var(--muted) 60%, transparent);
-  text-decoration-thickness: 2px;
-  text-underline-offset: 8px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  animation: pendingIn 250ms ease-out;
+  animation: pendingIn 200ms ease-out;
 }
 
 @keyframes pendingIn {

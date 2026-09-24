@@ -5,7 +5,7 @@ import { blobToWav } from "./lib/wav";
 import { analyzeSpeech, warmVad } from "./lib/vad";
 import {
   dictate,
-  liveTranscribe,
+  liveConvert,
   liveTranscriptionEnabled,
   ConfigError,
   type DictationResult,
@@ -85,6 +85,18 @@ function ArrowGlyph({ mirrored = false }: { mirrored?: boolean }) {
   );
 }
 
+function PendingEquation({ latex }: { latex: string }) {
+  const html = useMemo(
+    () => katex.renderToString(latex, { displayMode: true, throwOnError: false, strict: false }),
+    [latex],
+  );
+  return (
+    <div className="pending-line" aria-live="polite">
+      <div className="latex" dangerouslySetInnerHTML={{ __html: html }} />
+    </div>
+  );
+}
+
 function LineView({
   line,
   targeted,
@@ -132,13 +144,15 @@ export default function App() {
   const [past, setPast] = useState<Line[][]>([]);
   const [future, setFuture] = useState<Line[][]>([]);
   const [targetIndex, setTargetIndex] = useState<number | undefined>(undefined);
-  const [liveText, setLiveText] = useState("");
+  const [liveResult, setLiveResult] = useState<DictationResult | null>(null);
   const liveTimer = useRef<number | null>(null);
   const liveInFlight = useRef(false);
   const targetRef = useRef<number | undefined>(undefined);
   useEffect(() => {
     targetRef.current = targetIndex;
   }, [targetIndex]);
+  const ctxRef = useRef<{ lines: { latex: string }[]; targetIndex?: number }>({ lines: [] });
+  ctxRef.current = { lines: lines.map((l) => ({ latex: l.latex })), targetIndex };
   const recorderRef = useRef<PushToTalk | null>(null);
   const statusRef = useRef<Status>("idle");
   useEffect(() => {
@@ -156,8 +170,7 @@ export default function App() {
   const start = useCallback(async () => {
     if (statusRef.current !== "idle") return;
     setError("");
-    setLiveText("");
-    setLiveText("");
+    setLiveResult(null);
     // Warm the serverless function while the user is speaking (fire-and-forget)
     void fetch("/api/chat/completions", {
       method: "POST",
@@ -178,8 +191,14 @@ export default function App() {
           try {
             const { pcm, durationMs } = rec.snapshotPcm();
             if (durationMs > 700) {
-              const text = await liveTranscribe(pcm);
-              if (statusRef.current === "listening" && text) setLiveText(text);
+            const { result } = await liveConvert(pcm, ctxRef.current);
+              if (statusRef.current === "listening") {
+                if (result && (result.mode === "append" || result.mode === "append_lines" || result.mode === "replace_line")) {
+                  setLiveResult(result);
+                } else {
+                  setLiveResult(null); // noop / delete_last / clear by voice
+                }
+              }
             }
           } catch {
             /* transient — next poll retries */
@@ -219,23 +238,38 @@ export default function App() {
       const minPeak = isTargetedEdit ? 0.09 : 0.06;
       if (durationMs < minDuration || peak < minPeak) {
         setTargetIndex(undefined);
-        setLiveText("");
         setStatus("idle");
         return;
       }
       const wavAndPcm = await blobToWav(blob);
-      // Speech check runs in parallel with the API call — no-speech results
-      // are discarded when both complete
-      const [result, speech] = await Promise.all([
-        dictate(wavAndPcm.wav, {
-          lines: lines.map((l) => ({ latex: l.latex })),
-          targetIndex: target,
-        }),
-        analyzeSpeech(wavAndPcm.pcm),
-      ]);
-      const minSpeechMs = target !== undefined ? 600 : 500;
+      // VAD runs while the release pass happens — no-speech results are
+      // discarded when both complete
+      const speechPromise = analyzeSpeech(wavAndPcm.pcm);
+      const minSpeechMs = target !== undefined ? 600 : 350;
+      const ctx = { lines: lines.map((l) => ({ latex: l.latex })), targetIndex: target };
+      let result: DictationResult | null = null;
+      // Fresh live coverage: the provisional equation IS the result — promote it.
+      // Coverage: the poll ran while listening, so estimate by hold duration —
+      // a poll that completed within the last second is considered fresh.
+      const fresh = liveResult !== null;
+      if (fresh) {
+        result = liveResult;
+      } else {
+        // Stale: one final full-clip poll (transcribe + convert), then promote
+        try {
+          const { result: r } = await liveConvert(wavAndPcm.pcm, ctx);
+          result = r;
+        } catch {
+          result = null; // fall back to the single audio-LLM path
+        }
+      }
+      if (!result) {
+        result = await dictate(wavAndPcm.wav, ctx);
+      }
+      const speech = await speechPromise;
       if (speech.ok && speech.speechMs < minSpeechMs) {
         setTargetIndex(undefined);
+        setLiveResult(null);
         setStatus("idle");
         return;
       }
@@ -246,15 +280,15 @@ export default function App() {
         setLines(next);
       }
       setTargetIndex(undefined);
-      setLiveText("");
+      setLiveResult(null);
       setStatus("idle");
     } catch (e) {
       setTargetIndex(undefined);
-      setLiveText("");
+      setLiveResult(null);
       setStatus("error");
       setError(e instanceof ConfigError ? e.message : (e as Error).message || "Something went wrong");
     }
-  }, [lines, stopLivePolls]);
+  }, [lines, liveResult, stopLivePolls]);
 
   const undo = useCallback(() => {
     setPast((p) => {
@@ -355,10 +389,8 @@ export default function App() {
           </div>
         )}
 
-        {listening && liveText && (
-          <div className="pending-line" aria-live="polite">
-            {liveText}
-          </div>
+        {liveResult && liveResult.lines[0] && (listening || thinking) && (
+          <PendingEquation latex={liveResult.lines[0]} />
         )}
       </main>
 

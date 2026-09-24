@@ -145,6 +145,7 @@ export default function App() {
   const [future, setFuture] = useState<Line[][]>([]);
   const [targetIndex, setTargetIndex] = useState<number | undefined>(undefined);
   const [liveResult, setLiveResult] = useState<DictationResult | null>(null);
+  const liveCoverageRef = useRef(0); // ms of audio covered by the last completed poll
   const liveTimer = useRef<number | null>(null);
   const liveInFlight = useRef(false);
   const targetRef = useRef<number | undefined>(undefined);
@@ -171,6 +172,7 @@ export default function App() {
     if (statusRef.current !== "idle") return;
     setError("");
     setLiveResult(null);
+    liveCoverageRef.current = 0;
     // Warm the serverless function while the user is speaking (fire-and-forget)
     void fetch("/api/chat/completions", {
       method: "POST",
@@ -249,9 +251,10 @@ export default function App() {
       const ctx = { lines: lines.map((l) => ({ latex: l.latex })), targetIndex: target };
       let result: DictationResult | null = null;
       // Fresh live coverage: the provisional equation IS the result — promote it.
-      // Coverage: the poll ran while listening, so estimate by hold duration —
-      // a poll that completed within the last second is considered fresh.
-      const fresh = liveResult !== null;
+      // Stale (audio grew after the last poll): one final full-clip poll first.
+      const fresh =
+        liveResult !== null &&
+        liveCoverageRef.current >= Math.max(600, durationMs - 600);
       if (fresh) {
         result = liveResult;
       } else {

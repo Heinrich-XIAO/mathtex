@@ -1,4 +1,4 @@
-import { SYSTEM_PROMPT } from "./prompt";
+import { SYSTEM_PROMPT, SPLIT_PROMPT } from "./prompt";
 import { pcmToWav } from "./wav";
 
 export type Mode = "append" | "append_lines" | "replace_line" | "delete_last" | "noop";
@@ -39,7 +39,7 @@ function contextText(ctx: CallContext): string {
   if (ctx.targetIndex !== undefined && ctx.targetIndex >= 0 && ctx.targetIndex < ctx.lines.length) {
     return `Current file lines (most recent last):\n${numbered}\n\nTARGET LINE: line ${ctx.targetIndex + 1} (${ctx.lines[ctx.targetIndex].latex}). The audio is an edit instruction for THIS line only. Listen to the audio and produce the JSON object.`;
   }
-  return `Current file lines (most recent last):\n${numbered}\n\nThe current line is line ${ctx.lines.length}. Listen to the audio and produce the JSON object.`;
+  return `Current file lines (most recent last):\n${numbered}\n\nThe audio is NEW dictation to append after line ${ctx.lines.length} as a new line. Use "replace_line" only if the audio is an explicit edit command for an existing line. Listen to the audio and produce the JSON object.`;
 }
 
 function arrayBufferToBase64(buf: ArrayBuffer): string {
@@ -57,8 +57,36 @@ function stripFences(s: string): string {
   return m ? m[1] : s;
 }
 
-function parseResult(raw: string): DictationResult {
-  const obj = JSON.parse(stripFences(raw)) as Record<string, unknown>;
+/** JSON.parse with a fallback for models that emit LaTeX backslashes unescaped (\frac, \int). */
+function parseJsonLenient(content: string): unknown {
+  try {
+    return JSON.parse(content);
+  } catch {
+    return JSON.parse(sanitizeJsonBackslashes(content));
+  }
+}
+
+// Walk the string respecting valid \\ pairs: double any lone backslash that
+// isn't already a valid JSON escape.
+function sanitizeJsonBackslashes(s: string): string {
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== "\\") {
+      out += s[i];
+      continue;
+    }
+    const next = s[i + 1] ?? "";
+    if (next === "\\" || /^["/bfnrtu]$/.test(next)) {
+      out += s.slice(i, i + 2);
+      i += 1;
+    } else {
+      out += "\\\\";
+    }
+  }
+  return out;
+}
+
+function parseResult(raw: string): DictationResult {  const obj = JSON.parse(stripFences(raw)) as Record<string, unknown>;
   const modes: Mode[] = ["append", "append_lines", "replace_line", "delete_last", "noop"];
   const mode = modes.includes(obj.mode as Mode) ? (obj.mode as Mode) : "append";
   const lines: string[] = Array.isArray(obj.latex)
@@ -88,6 +116,30 @@ export async function dictate(
   opts?: { signal?: AbortSignal },
 ): Promise<DictationResult> {
   return dictateAudioLlm(wav, ctx, opts);
+}
+
+/** Ask the LLM to split one over-wide LaTeX line into several shorter lines. */
+export async function splitLine(latex: string): Promise<string[]> {
+  const res = await fetch(`${BASE}/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: MODEL,
+      temperature: 0,
+      max_tokens: 400,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: SPLIT_PROMPT },
+        { role: "user", content: latex },
+      ],
+    }),
+  });
+  if (!res.ok) throw new Error(`split ${res.status}`);
+  const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+  const content = data.choices?.[0]?.message?.content ?? "";
+  const obj = parseJsonLenient(stripFences(content)) as { lines?: unknown };
+  if (!Array.isArray(obj.lines)) throw new Error("split: missing lines array");
+  return obj.lines.filter((l): l is string => typeof l === "string" && l.trim().length > 0);
 }
 
 export const liveTranscriptionEnabled = (): boolean => LIVE_TRANSCRIBE_MODEL.length > 0;

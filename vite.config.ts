@@ -1,5 +1,6 @@
 import react from '@vitejs/plugin-react'
 import { defineConfig, loadEnv } from 'vite'
+import { VitePWA } from 'vite-plugin-pwa'
 import { existsSync, readFileSync } from 'node:fs'
 
 // Self-signed cert for https (mic requires a secure context off localhost).
@@ -29,7 +30,52 @@ export default defineConfig(({ mode }) => {
   }
 
   return {
-    plugins: [react()],
+    plugins: [
+      react(),
+      VitePWA({
+        registerType: 'autoUpdate',
+        includeAssets: ['favicon.svg', 'icons.svg', 'icons/apple-touch-icon.png'],
+        manifest: {
+          name: 'MathTex — voice math dictation',
+          short_name: 'MathTex',
+          description: 'Dictate math by voice and get LaTeX.',
+          lang: 'en',
+          start_url: '/',
+          display: 'standalone',
+          theme_color: '#0e1116',
+          background_color: '#0e1116',
+          icons: [
+            { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' },
+            { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png' },
+            {
+              src: '/icons/maskable-512.png',
+              sizes: '512x512',
+              type: 'image/png',
+              purpose: 'maskable',
+            },
+          ],
+        },
+        workbox: {
+          // App shell: precache built assets (JS/CSS/HTML/fonts/icons).
+          globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
+          maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
+          navigateFallback: '/index.html',
+          // ONNX runtime + VAD model are big (14M+2.3M): cache at runtime
+          // instead of precaching, so first install stays light.
+          runtimeCaching: [
+            {
+              urlPattern: /\/(ort|vad)\//,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'model-assets',
+                cacheableResponse: { statuses: [200] },
+                expiration: { maxEntries: 8, maxAgeSeconds: 60 * 60 * 24 * 365 },
+              },
+            },
+          ],
+        },
+      }),
+    ],
     server: { proxy: proxyConfig },
     preview: { proxy: proxyConfig, https: httpsCerts },
   }

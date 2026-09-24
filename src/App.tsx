@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import katex from "katex";
 import { PushToTalk } from "./lib/recorder";
 import { blobToWav } from "./lib/wav";
@@ -7,9 +15,11 @@ import {
   dictate,
   liveConvert,
   liveTranscriptionEnabled,
+  splitLine,
   ConfigError,
   type DictationResult,
 } from "./lib/api";
+import { useInstall } from "./lib/install";
 
 type Status = "idle" | "listening" | "thinking" | "error";
 
@@ -21,6 +31,55 @@ interface Line {
 }
 
 const LOW_CONFIDENCE = 0.7;
+// .line .latex sets font-size: 1.3rem in CSS; keep the two in sync
+const BASE_FONT_REM = 1.3;
+// Below this scale a line is considered over-wide even after shrinking
+const MIN_SCALE = 0.6;
+
+/**
+ * Shrink-to-fit: measure the natural (unscaled) KaTeX width against the
+ * container and return a font scale in [MIN_SCALE, 1]. Measurement is
+ * feedback-free — the scale is derived from the natural width, not the
+ * currently-scaled width, so it cannot oscillate.
+ */
+function useFitScale(
+  ref: RefObject<HTMLDivElement | null>,
+  html: string,
+): { scale: number; overflows: boolean } {
+  const [state, setState] = useState({ scale: 1, overflows: false });
+  const scaleRef = useRef(1);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => {
+      const katexEl = el.querySelector(".katex") as HTMLElement | null;
+      if (!katexEl) return;
+      // .katex is an inline-block: its width is the natural content width,
+      // which scales linearly with font-size
+      const natural = katexEl.offsetWidth / scaleRef.current;
+      const avail = el.clientWidth;
+      if (avail <= 0 || natural <= 0) return;
+      const raw = avail / natural;
+      // 0.5% granularity so rounding can't thrash the scale back and forth
+      const next = Math.round(Math.max(MIN_SCALE, Math.min(1, raw)) * 200) / 200;
+      if (next !== scaleRef.current) {
+        scaleRef.current = next;
+        setState({ scale: next, overflows: raw < MIN_SCALE });
+      } else {
+        setState((s) => (s.overflows === raw < MIN_SCALE ? s : { ...s, overflows: raw < MIN_SCALE }));
+      }
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    window.addEventListener("resize", measure);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [html, ref]);
+  return state;
+}
 
 function applyResult(lines: Line[], r: DictationResult, targetIndex?: number): Line[] {
   switch (r.mode) {
@@ -85,14 +144,29 @@ function ArrowGlyph({ mirrored = false }: { mirrored?: boolean }) {
   );
 }
 
+function InstallGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" width={16} height={16} fill="currentColor" aria-hidden>
+      <path d="M12 3v10.17l-3.59-3.58L7 11l5 5 5-5-1.41-1.41L12 13.17V3zM5 19h14v2H5z" />
+    </svg>
+  );
+}
+
 function PendingEquation({ latex }: { latex: string }) {
   const html = useMemo(
     () => katex.renderToString(latex, { displayMode: true, throwOnError: false, strict: false }),
     [latex],
   );
+  const ref = useRef<HTMLDivElement>(null);
+  const { scale } = useFitScale(ref, html);
   return (
     <div className="pending-line" aria-live="polite">
-      <div className="latex" dangerouslySetInnerHTML={{ __html: html }} />
+      <div
+        ref={ref}
+        className="latex"
+        style={scale < 1 ? { fontSize: `${BASE_FONT_REM * scale}rem` } : undefined}
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
     </div>
   );
 }
@@ -103,24 +177,40 @@ function LineView({
   provisional,
   onMicDown,
   onMicUp,
+  onOverflow,
 }: {
   line: Line;
   targeted: boolean;
   provisional: boolean;
   onMicDown: () => void;
   onMicUp: () => void;
+  onOverflow?: () => void;
 }) {
   const html = useMemo(
     () => katex.renderToString(line.latex, { displayMode: true, throwOnError: false, strict: false }),
     [line.latex],
   );
+  const ref = useRef<HTMLDivElement>(null);
+  const { scale, overflows } = useFitScale(ref, html);
+  const reportedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!overflows || provisional || !onOverflow) return;
+    if (reportedRef.current === line.latex) return;
+    reportedRef.current = line.latex;
+    onOverflow();
+  }, [overflows, provisional, onOverflow, line.latex]);
   const low = line.confidence < LOW_CONFIDENCE;
   return (
     <div
       className={`line ${low ? "low" : ""} ${targeted ? "targeted" : ""} ${provisional ? "provisional" : ""}`}
       title={low ? line.note : undefined}
     >
-      <div className="latex" dangerouslySetInnerHTML={{ __html: html }} />
+      <div
+        ref={ref}
+        className="latex"
+        style={scale < 1 ? { fontSize: `${BASE_FONT_REM * scale}rem` } : undefined}
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
       <button
         className="line-mic"
         title="Hold to edit this line by voice"
@@ -160,6 +250,9 @@ export default function App() {
   }, [targetIndex]);
   const ctxRef = useRef<{ lines: { latex: string }[]; targetIndex?: number }>({ lines: [] });
   ctxRef.current = { lines: lines.map((l) => ({ latex: l.latex })), targetIndex };
+  const linesRef = useRef<Line[]>([]);
+  linesRef.current = lines;
+  const splitAttemptedRef = useRef<Set<string>>(new Set());
   const recorderRef = useRef<PushToTalk | null>(null);
   const statusRef = useRef<Status>("idle");
   useEffect(() => {
@@ -308,6 +401,46 @@ export default function App() {
     }
   }, [lines, liveResult, stopLivePolls]);
 
+  // A solid line still overflows at the minimum font scale: ask the model to
+  // split it into several shorter lines (split at relation signs) and swap it
+  // in-place, keeping the transcript/confidence of the original.
+  const handleOverflow = useCallback((latex: string) => {
+    if (splitAttemptedRef.current.has(latex)) return;
+    splitAttemptedRef.current.add(latex);
+    void (async () => {
+      try {
+        const parts = await splitLine(latex);
+        // Never re-attempt the original or any split result
+        splitAttemptedRef.current.add(latex);
+        for (const p of parts) splitAttemptedRef.current.add(p);
+        if (parts.length < 2) return;
+        // Safety: refuse the split if it lost or altered any math
+        const stripped = (s: string) => s.replace(/\s+/g, "");
+        if (stripped(parts.join("")) !== stripped(latex)) return;
+        const before = linesRef.current;
+        const idx = before.findIndex((l) => l.latex === latex);
+        if (idx < 0) return;
+        const orig = before[idx];
+        const next = [...before];
+        next.splice(
+          idx,
+          1,
+          ...parts.map((l) => ({
+            latex: l,
+            transcript: orig.transcript,
+            confidence: orig.confidence,
+            note: orig.note,
+          })),
+        );
+        setPast((p) => [...p.slice(-49), before]);
+        setFuture([]);
+        setLines(next);
+      } catch {
+        // split failed: the line stays at min scale, horizontally scrollable
+      }
+    })();
+  }, []);
+
   const undo = useCallback(() => {
     setProvisionalFrom(null);
     setPast((p) => {
@@ -368,6 +501,7 @@ export default function App() {
 
   const listening = status === "listening";
   const thinking = status === "thinking";
+  const { mode: installMode, install, dismiss: dismissInstall } = useInstall();
 
   return (
     <div className={`app${listening ? " listening" : ""}`}>
@@ -405,6 +539,7 @@ export default function App() {
                   void start();
                 }}
                 onMicUp={() => void finish()}
+                onOverflow={() => handleOverflow(line.latex)}
               />
             ))}
           </div>
@@ -436,7 +571,22 @@ export default function App() {
           onContextMenu={(e) => e.preventDefault()}
           title={listening && targetIndex !== undefined ? `Editing line ${targetIndex + 1}` : undefined}
         />
+        {installMode === "install" && (
+          <button className="install" onClick={install} title="Install MathTex as an app">
+            <InstallGlyph />
+          </button>
+        )}
       </footer>
+      {installMode === "ios" && (
+        <div className="install-hint" role="status">
+          <span>
+            Install: tap <b>Share</b> then <b>Add to Home Screen</b>
+          </span>
+          <button className="install-hint-dismiss" onClick={dismissInstall} title="Dismiss">
+            ×
+          </button>
+        </div>
+      )}
     </div>
   );
 }

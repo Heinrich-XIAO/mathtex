@@ -217,6 +217,65 @@ body {
   opacity: 0.12;
 }
 
+/* Bottom-right install button (PWA) */
+.install {
+  position: absolute;
+  right: 6px;
+  bottom: 26px;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  opacity: 0.35;
+  padding: 7px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: opacity 120ms;
+}
+
+.install:hover {
+  opacity: 0.9;
+  color: var(--text);
+}
+
+.install-hint {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 86px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--card);
+  border: 1px solid var(--card-edge);
+  border-radius: 12px;
+  padding: 10px 14px;
+  color: var(--muted);
+  font-size: 0.85rem;
+  max-width: calc(100vw - 32px);
+}
+
+.install-hint b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.install-hint-dismiss {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.install-hint-dismiss:hover {
+  color: var(--text);
+}
+
 /* Dynamic-island pill: flat, dark, iconless; glows while active */
 .pill {
   display: inline-block;

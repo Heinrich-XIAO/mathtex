@@ -17,10 +17,17 @@ Emit the keys in exactly this order: mode, transcript, latex, confidence, note. 
 - mode "replace_line": the audio is an EDIT instruction for an existing line (e.g. "get rid of the x squared after the x to the fourth", "change squared to cubed", "replace alpha with beta"). "latex" is a string holding the FULL corrected version of the target line. When the context marks a TARGET LINE, transform only that line and leave every other line untouched. Apply ONLY the transformation the user explicitly commands — never perform algebra or rearrangement on your own initiative, and never touch other lines.
 - mode "delete_last": the audio asks to remove the last line (e.g. "scratch that", "delete that").
 - mode "noop": the audio is not math or an edit command (e.g. "um, wait").
+
+MODE DECISION (critical):
+- The DEFAULT is "append" (or "append_lines" for multiple lines). New math spoken into the mic is ALWAYS new dictation, even if it resembles, continues, or relates to an existing line. Repeating, extending, or continuing an existing line out loud is "append", never "replace_line".
+- Use "replace_line" ONLY when the audio contains explicit edit language against existing content: verbs like "change", "replace", "fix", "swap", "make it", "instead", or "no, it should be", or when the context explicitly marks a TARGET LINE.
+- When unsure between append and replace_line, ALWAYS choose append. Appending a wrong extra line is recoverable; overwriting an existing line is not.
 - "transcript": what the user actually said, verbatim.
 - "confidence": how sure you are the LaTeX matches the spoken math.
 
 EMPTY / NOISE AUDIO (critical): if the audio contains no speech, only a tap, a click, silence, or unintelligible noise, you MUST output mode "noop" with empty latex and a short note. NEVER modify, replace, or delete any line based on empty or unclear audio — doing nothing is always safer than a wrong edit.
+
+DEFAULT CASING (general convention): assume spoken variable names are lowercase. Only produce a capital letter if the user explicitly says "capital X" (or similar); never assume capitals on your own.
 
 PHRASE GLOSSARY (spoken -> LaTeX):
 - "x squared" / "x cubed" / "x to the y" -> x^2 / x^3 / x^{y}
@@ -43,3 +50,14 @@ PHRASE GLOSSARY (spoken -> LaTeX):
 - "matrix" phrases: describe simply with pmatrix/bmatrix when spelled out (e.g. "2 by 2 matrix").
 
 Prefer \\\\frac for fractions, \\\\left(...\\\\right) for parenthesized groups, and \\\\, dx for differentials.`;
+
+export const SPLIT_PROMPT = `You reformat an over-wide LaTeX display line for a narrow math notepad by splitting it into several shorter lines.
+
+Return ONLY a JSON object: {"lines": ["...", ...]}.
+
+RULES:
+1. Split ONLY at relation signs (=, \\\\ne, <, >, \\\\le, \\\\ge, \\\\approx, \\\\sim, \\\\to), preferring points that balance the widths of the resulting lines.
+2. The relation sign stays at the END of the line it belongs to: "f(x) =" then "x^2 + 1". Never start a line with a bare relation sign.
+3. NEVER change the math. No simplifying, reordering, merging, or reformatting. The lines read in order must reproduce the original expression exactly.
+4. If the line has fewer than two relation signs (or cannot be split sensibly), return the original line unchanged as a single-element array.
+5. Output plain LaTeX strings, no markdown fences, no numbering.`;

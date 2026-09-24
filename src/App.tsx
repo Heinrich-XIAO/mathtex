@@ -100,11 +100,13 @@ function PendingEquation({ latex }: { latex: string }) {
 function LineView({
   line,
   targeted,
+  provisional,
   onMicDown,
   onMicUp,
 }: {
   line: Line;
   targeted: boolean;
+  provisional: boolean;
   onMicDown: () => void;
   onMicUp: () => void;
 }) {
@@ -114,7 +116,10 @@ function LineView({
   );
   const low = line.confidence < LOW_CONFIDENCE;
   return (
-    <div className={`line ${low ? "low" : ""} ${targeted ? "targeted" : ""}`} title={low ? line.note : undefined}>
+    <div
+      className={`line ${low ? "low" : ""} ${targeted ? "targeted" : ""} ${provisional ? "provisional" : ""}`}
+      title={low ? line.note : undefined}
+    >
       <div className="latex" dangerouslySetInnerHTML={{ __html: html }} />
       <button
         className="line-mic"
@@ -145,6 +150,7 @@ export default function App() {
   const [future, setFuture] = useState<Line[][]>([]);
   const [targetIndex, setTargetIndex] = useState<number | undefined>(undefined);
   const [liveResult, setLiveResult] = useState<DictationResult | null>(null);
+  const [provisionalFrom, setProvisionalFrom] = useState<number | null>(null);
   const liveCoverageRef = useRef(0); // ms of audio covered by the last completed poll
   const liveTimer = useRef<number | null>(null);
   const liveInFlight = useRef(false);
@@ -231,6 +237,7 @@ export default function App() {
     if (statusRef.current !== "listening" || !recorderRef.current) return;
     stopLivePolls();
     const target = targetRef.current;
+    stopLivePolls();
     setStatus("thinking");
     try {
       const { blob, durationMs, peak } = await recorderRef.current.stop();
@@ -244,56 +251,65 @@ export default function App() {
         return;
       }
       const wavAndPcm = await blobToWav(blob);
-      // VAD runs while the release pass happens — no-speech results are
-      // discarded when both complete
       const speechPromise = analyzeSpeech(wavAndPcm.pcm);
-      const minSpeechMs = target !== undefined ? 600 : 350;
       const ctx = { lines: lines.map((l) => ({ latex: l.latex })), targetIndex: target };
-      let result: DictationResult | null = null;
-      // Fresh live coverage: the provisional equation IS the result — promote it.
-      // Stale (audio grew after the last poll): one final full-clip poll first.
-      const fresh =
-        liveResult !== null &&
-        liveCoverageRef.current >= Math.max(600, durationMs - 600);
-      if (fresh) {
-        result = liveResult;
-      } else {
-        // Stale: one final full-clip poll (transcribe + convert), then promote
-        try {
-          const { result: r } = await liveConvert(wavAndPcm.pcm, ctx);
-          result = r;
-        } catch {
-          result = null; // fall back to the single audio-LLM path
+      const before = lines;
+      let promotedAt: number | null = null;
+
+      // 1) Instant: promote the live provisional equation as a faded line
+      if (
+        liveResult &&
+        (liveResult.mode === "append" || liveResult.mode === "append_lines" || liveResult.mode === "replace_line")
+      ) {
+        const next = applyResult(before, liveResult, target);
+        if (next !== before) {
+          setPast((p) => [...p.slice(-49), before]);
+          setFuture([]);
+          setLines(next);
+          promotedAt =
+            liveResult.mode === "replace_line"
+              ? target !== undefined && target < before.length
+                ? target
+                : before.length - 1
+              : before.length;
         }
       }
-      if (!result) {
-        result = await dictate(wavAndPcm.wav, ctx);
-      }
+
+      // 2) VAD verdict: no speech -> remove the provisional, done
       const speech = await speechPromise;
+      const minSpeechMs = target !== undefined ? 600 : 350;
       if (speech.ok && speech.speechMs < minSpeechMs) {
+        if (promotedAt !== null) setLines(before);
+        setProvisionalFrom(null);
         setTargetIndex(undefined);
         setLiveResult(null);
         setStatus("idle");
         return;
       }
-      const next = applyResult(lines, result, target);
-      if (next !== lines) {
-        setPast((p) => [...p.slice(-49), lines]);
-        setFuture([]);
-        setLines(next);
+
+      // 3) Authoritative finalize: the audio-LLM hears the full clip and
+      //    replaces the provisional with the accurate result
+      try {
+        const final = await dictate(wavAndPcm.wav, ctx);
+        setProvisionalFrom(null);
+        setLines((prev) => applyResult(promotedAt !== null ? before : prev, final, target));
+      } catch {
+        // finalize failed: keep the provisional as a solid line
+        setProvisionalFrom(null);
       }
       setTargetIndex(undefined);
       setLiveResult(null);
       setStatus("idle");
     } catch (e) {
       setTargetIndex(undefined);
-      setLiveResult(null);
+      setProvisionalFrom(null);
       setStatus("error");
       setError(e instanceof ConfigError ? e.message : (e as Error).message || "Something went wrong");
     }
   }, [lines, liveResult, stopLivePolls]);
 
   const undo = useCallback(() => {
+    setProvisionalFrom(null);
     setPast((p) => {
       if (p.length === 0) return p;
       const prev = p[p.length - 1];
@@ -304,6 +320,7 @@ export default function App() {
   }, [lines]);
 
   const redo = useCallback(() => {
+    setProvisionalFrom(null);
     setFuture((f) => {
       if (f.length === 0) return f;
       const next = f[0];
@@ -382,6 +399,7 @@ export default function App() {
                 key={i}
                 line={line}
                 targeted={targetIndex === i}
+                provisional={provisionalFrom !== null && i >= provisionalFrom}
                 onMicDown={() => {
                   setTargetIndex(i);
                   void start();

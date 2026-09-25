@@ -9,6 +9,11 @@
   --accent: #7c9cff;
   --amber: #e5b567;
   --red: #f87171;
+  /* Wispr Flow-style dictation controls */
+  --wisp-surface: #c7c2d3;
+  --wisp-ink: #241e33;
+  --wisp-purple: #5d3da4;
+  --wisp-purple-ink: #ece7f8;
 }
 
 * {
@@ -91,9 +96,54 @@ body {
 
 .line {
   position: relative;
-  padding: 2px 40px 2px 8px;
+  overflow: hidden;
   border-radius: 10px;
   transition: background 120ms;
+  /* Horizontal moves belong to the swipe gesture; vertical scroll stays native */
+  touch-action: pan-y;
+}
+
+/* Sliding row content: latex + line mic travel together over the delete action */
+.line-body {
+  position: relative;
+  z-index: 1;
+  padding: 2px 40px 2px 8px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Delete action revealed by swiping the row left; hidden until it peeks out */
+.line-delete {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 76px;
+  border: none;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--red) 20%, var(--card));
+  color: var(--red);
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 700;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 150ms, background 120ms;
+}
+
+.line.revealed .line-delete,
+.line.swiping .line-delete {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.line-delete:hover {
+  background: color-mix(in srgb, var(--red) 32%, var(--card));
+}
+
+.line-delete:active {
+  background: color-mix(in srgb, var(--red) 44%, var(--card));
 }
 
 .line .latex {
@@ -107,6 +157,8 @@ body {
   margin-bottom: -0.5em;
   text-align: center;
   font-size: 1.3rem;
+  /* Let the row's swipe gesture win over the latex's own horizontal scroll */
+  touch-action: pan-y;
 }
 
 /* KaTeX display mode defaults to margin: 1em 0 — crush it */
@@ -206,6 +258,7 @@ body {
   bottom: 26px;
   display: flex;
   gap: 4px;
+  transition: opacity 150ms;
 }
 
 .ghost {
@@ -290,31 +343,41 @@ body {
   color: var(--text);
 }
 
-/* Dynamic-island pill: flat, dark, iconless; glows while active */
+/* Wispr Flow-style dictation cluster: lavender waveform pill flanked by
+   cancel / confirm circles, floating at the bottom of the screen. */
+.dictation {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
 .pill {
-  display: inline-block;
-  min-width: 72px;
-  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 148px;
+  height: 48px;
   border: none;
   border-radius: 999px;
-  background: #05070b;
+  background: var(--wisp-surface);
+  color: var(--wisp-ink);
   cursor: pointer;
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 7%), 0 4px 18px rgb(0 0 0 / 45%);
-  transition: box-shadow 200ms, transform 150ms;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 30%),
+    0 14px 34px rgb(5 3 12 / 45%),
+    0 4px 10px rgb(5 3 12 / 30%);
+  transition: transform 140ms, box-shadow 200ms;
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
 }
 
-.pill:disabled {
-  cursor: default;
+.pill:not(:disabled):active {
+  transform: scale(0.96);
 }
 
-.pill.listening {
-  box-shadow:
-    inset 0 0 0 1px rgb(124 156 255 / 40%),
-    0 0 26px rgb(124 156 255 / 30%),
-    0 4px 18px rgb(0 0 0 / 45%);
+.pill:disabled {
+  cursor: default;
 }
 
 .pill.thinking {
@@ -322,6 +385,200 @@ body {
 }
 
 @keyframes pillPulse {
-  0%, 100% { box-shadow: inset 0 0 0 1px rgb(255 255 255 / 7%), 0 4px 18px rgb(0 0 0 / 45%); }
-  50% { box-shadow: inset 0 0 0 1px rgb(255 255 255 / 18%), 0 0 18px rgb(255 255 255 / 12%), 0 4px 18px rgb(0 0 0 / 45%); }
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.045); }
+}
+
+.waveform {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 100%;
+  padding: 0 16px;
+}
+
+.waveform span {
+  width: 3px;
+  height: 22px;
+  border-radius: 3px;
+  background: var(--wisp-ink);
+  transform: scaleY(0.14);
+  transform-origin: center;
+  will-change: transform;
+}
+
+.orb {
+  position: absolute;
+  top: 50%;
+  width: 48px;
+  height: 48px;
+  border: none;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  background: var(--wisp-surface);
+  color: var(--wisp-ink);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 30%),
+    0 14px 34px rgb(5 3 12 / 45%),
+    0 4px 10px rgb(5 3 12 / 30%);
+  touch-action: manipulation;
+  animation: orbIn 170ms ease-out;
+}
+
+.orb-cancel {
+  right: calc(100% + 16px);
+  transform: translateY(-50%);
+}
+
+.orb-confirm {
+  left: calc(100% + 16px);
+  transform: translateY(-50%);
+  background: var(--wisp-purple);
+  color: var(--wisp-purple-ink);
+}
+
+.orb:not(:disabled):active {
+  transform: translateY(-50%) scale(0.94);
+}
+
+@keyframes orbIn {
+  from { opacity: 0; transform: translateY(calc(-50% + 10px)) scale(0.8); }
+  to { opacity: 1; transform: translateY(-50%) scale(1); }
+}
+
+/* While recording, the corner ghosts step aside for the cancel/confirm orbs */
+.app.listening .history,
+.app.listening .install {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Page-load background-context dialog */
+.context-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgb(5 8 14 / 60%);
+  backdrop-filter: blur(4px);
+}
+
+.context-dialog {
+  width: min(560px, 100%);
+  background: var(--card);
+  border: 1px solid var(--card-edge);
+  border-radius: 14px;
+  padding: 20px 22px;
+  box-shadow: 0 24px 60px rgb(0 0 0 / 45%);
+  animation: dialogIn 180ms ease-out;
+}
+
+@keyframes dialogIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
+.context-dialog h2 {
+  margin: 0 0 6px;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.context-dialog p {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.context-input {
+  width: 100%;
+  min-height: 130px;
+  resize: vertical;
+  background: var(--bg);
+  border: 1px solid var(--card-edge);
+  border-radius: 10px;
+  color: var(--text);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  padding: 10px 12px;
+}
+
+.context-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.context-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.context-secondary {
+  background: transparent;
+  border: 1px solid var(--card-edge);
+  border-radius: 999px;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 0.85rem;
+  padding: 8px 16px;
+  cursor: pointer;
+}
+
+.context-secondary:hover {
+  color: var(--text);
+  border-color: var(--muted);
+}
+
+.context-primary {
+  background: var(--accent);
+  border: none;
+  border-radius: 999px;
+  color: #10131a;
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 8px 16px;
+  cursor: pointer;
+}
+
+.context-primary:hover {
+  filter: brightness(1.1);
+}
+
+/* Footer ghost that reopens the dialog; brighter when context is active */
+.ghost.has-context {
+  opacity: 0.7;
+  color: var(--accent);
+}
+
+@media (max-width: 480px) {
+  .pill {
+    min-width: 128px;
+    height: 46px;
+  }
+
+  .orb {
+    width: 46px;
+    height: 46px;
+  }
+
+  .orb-cancel {
+    right: calc(100% + 10px);
+  }
+
+  .orb-confirm {
+    left: calc(100% + 10px);
+  }
+
+  .waveform span {
+    height: 20px;
+  }
 }

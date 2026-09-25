@@ -17,6 +17,7 @@ import {
   liveTranscriptionEnabled,
   splitLine,
   ConfigError,
+  type CallContext,
   type DictationResult,
 } from "./lib/api";
 import { useInstall } from "./lib/install";
@@ -31,6 +32,26 @@ interface Line {
 }
 
 const LOW_CONFIDENCE = 0.7;
+// Background context the student gives at load (Khan Academy copy, LaTeX, …):
+// stored so it survives reloads and sent to the LLM with every call.
+const CONTEXT_KEY = "mathtex.background-context";
+const CONTEXT_MAX = 4000;
+
+function loadStoredContext(): string {
+  try {
+    return localStorage.getItem(CONTEXT_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function storeContext(v: string): void {
+  try {
+    localStorage.setItem(CONTEXT_KEY, v);
+  } catch {
+    /* private mode: context just won't persist */
+  }
+}
 // .line .latex sets font-size: 1.3rem in CSS; keep the two in sync
 const BASE_FONT_REM = 1.3;
 // Below this scale a line is considered over-wide even after shrinking
@@ -156,6 +177,102 @@ function InstallGlyph() {
   );
 }
 
+function ContextGlyph() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={15}
+      height={15}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+      <line x1="8" y1="13" x2="16" y2="13" />
+      <line x1="8" y1="17" x2="13" y2="17" />
+    </svg>
+  );
+}
+
+function XGlyph() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={18}
+      height={18}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.4}
+      strokeLinecap="round"
+      aria-hidden
+    >
+      <path d="M6 6l12 12M18 6L6 18" />
+    </svg>
+  );
+}
+
+function CheckGlyph() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={20}
+      height={20}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.6}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M5 12.5l4.5 4.5L19 7.5" />
+    </svg>
+  );
+}
+
+const BAR_COUNT = 15;
+
+/** Wispr-style waveform: rolling history of mic levels, painted via direct
+ * DOM writes so the rAF loop never re-renders React. */
+function Waveform({ level, active }: { level: { current: number }; active: boolean }) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const histRef = useRef<number[]>(new Array(BAR_COUNT).fill(0.14));
+  const emaRef = useRef(0);
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const bars = Array.from(root.children) as HTMLElement[];
+    let raf = 0;
+    let lastPush = 0;
+    const tick = (t: number) => {
+      if (t - lastPush >= 60) {
+        lastPush = t;
+        const target = active ? Math.min(1, (level.current ?? 0) * 1.35) : 0;
+        emaRef.current += (target - emaRef.current) * 0.45;
+        const hist = histRef.current;
+        hist.push(Math.max(0.14, emaRef.current));
+        hist.shift();
+        for (let i = 0; i < BAR_COUNT; i++) {
+          bars[i].style.transform = `scaleY(${hist[i].toFixed(3)})`;
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [active, level]);
+  return (
+    <div ref={rootRef} className="waveform" aria-hidden>
+      {Array.from({ length: BAR_COUNT }, (_, i) => (
+        <span key={i} />
+      ))}
+    </div>
+  );
+}
+
 function PendingEquation({ latex }: { latex: string }) {
   const html = useMemo(
     () => katex.renderToString(latex, { displayMode: true, throwOnError: false, strict: false }),
@@ -175,20 +292,29 @@ function PendingEquation({ latex }: { latex: string }) {
   );
 }
 
+// Width of the delete action revealed by swiping a line left
+const SWIPE_REVEAL = 76;
+
 function LineView({
   line,
   targeted,
   provisional,
+  swipeEnabled,
   onMicDown,
   onMicUp,
   onOverflow,
+  onDelete,
+  onCancelDictation,
 }: {
   line: Line;
   targeted: boolean;
   provisional: boolean;
+  swipeEnabled: boolean;
   onMicDown: () => void;
   onMicUp: () => void;
   onOverflow?: () => void;
+  onDelete: () => void;
+  onCancelDictation: () => void;
 }) {
   const html = useMemo(
     () => katex.renderToString(line.latex, { displayMode: true, throwOnError: false, strict: false }),
@@ -204,34 +330,158 @@ function LineView({
     onOverflow();
   }, [overflows, provisional, onOverflow, line.latex]);
   const low = line.confidence < LOW_CONFIDENCE;
+
+  // Swipe-left-to-delete: the row body tracks the pointer horizontally,
+  // revealing an X action anchored at the right edge. Transform is written
+  // straight to the DOM during the drag; React only tracks open/closed.
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const offsetRef = useRef(0);
+  const dragRef = useRef({
+    id: -1,
+    startX: 0,
+    startY: 0,
+    active: false,
+    base: 0,
+    lastX: 0,
+    lastT: 0,
+    vx: 0,
+    enabled: false,
+    fromMic: false,
+  });
+  const [revealed, setRevealed] = useState(false);
+  const [swiping, setSwiping] = useState(false);
+
+  const setBody = useCallback((x: number, animated: boolean) => {
+    const el = bodyRef.current;
+    if (!el) return;
+    el.style.transition = animated ? "transform 220ms cubic-bezier(0.2, 0.7, 0.3, 1)" : "none";
+    el.style.transform = `translateX(${x}px)`;
+  }, []);
+
+  // The content can change underneath (undo/redo/voice edit) — reset the row
+  useEffect(() => {
+    offsetRef.current = 0;
+    setRevealed(false);
+    setBody(0, false);
+  }, [line.latex, setBody]);
+
+  // A press anywhere outside an open row closes it
+  useEffect(() => {
+    if (!revealed) return;
+    const onDown = (e: PointerEvent) => {
+      const row = bodyRef.current?.parentElement;
+      if (row && !row.contains(e.target as Node)) {
+        offsetRef.current = 0;
+        setRevealed(false);
+        setBody(0, true);
+      }
+    };
+    window.addEventListener("pointerdown", onDown, true);
+    return () => window.removeEventListener("pointerdown", onDown, true);
+  }, [revealed, setBody]);
+
+  // Capture-phase handlers: they see presses that land on the row's buttons
+  // (the line mic calls stopPropagation in its own bubble handler) so the
+  // swipe can arbitrate against them.
+  const onRowPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current;
+    d.id = e.pointerId;
+    d.startX = e.clientX;
+    d.startY = e.clientY;
+    d.active = false;
+    d.base = offsetRef.current;
+    d.lastX = e.clientX;
+    d.lastT = e.timeStamp;
+    d.vx = 0;
+    d.enabled = swipeEnabled;
+    const t = e.target as HTMLElement | null;
+    d.fromMic = !!t?.closest?.(".line-mic");
+  };
+
+  const onRowPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current;
+    if (d.id === -1 || e.pointerId !== d.id) return;
+    const dx = e.clientX - d.startX;
+    const dy = e.clientY - d.startY;
+    if (!d.active) {
+      // Standard mobile pattern: a press stays a press until the finger
+      // travels sideways past the slop; then the swipe steals the gesture —
+      // cancelling a mic hold in flight — and the button press is void.
+      // Vertical movement never claims: native scrolling keeps winning.
+      const slop = d.fromMic ? 24 : 10;
+      if (Math.abs(dx) < slop || Math.abs(dx) <= Math.abs(dy)) return;
+      if (!d.enabled && !d.fromMic) return;
+      d.active = true;
+      if (d.fromMic) onCancelDictation();
+      e.currentTarget.setPointerCapture(e.pointerId);
+      setSwiping(true);
+    }
+    const next = Math.min(0, Math.max(-SWIPE_REVEAL, d.base + dx));
+    const dt = e.timeStamp - d.lastT;
+    if (dt > 0) d.vx = (e.clientX - d.lastX) / dt;
+    d.lastX = e.clientX;
+    d.lastT = e.timeStamp;
+    offsetRef.current = next;
+    setBody(next, false);
+  };
+
+  const onRowPointerEnd = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current;
+    if (d.id === -1 || e.pointerId !== d.id) return;
+    d.id = -1;
+    if (!d.active) return;
+    d.active = false;
+    setSwiping(false);
+    // Snap open past a third of the reveal, or on a quick leftward flick
+    const open = offsetRef.current < -SWIPE_REVEAL / 3 || d.vx < -0.5;
+    offsetRef.current = open ? -SWIPE_REVEAL : 0;
+    setBody(offsetRef.current, true);
+    setRevealed(open);
+  };
+
   return (
     <div
-      className={`line ${low ? "low" : ""} ${targeted ? "targeted" : ""} ${provisional ? "provisional" : ""}`}
+      className={`line ${low ? "low" : ""} ${targeted ? "targeted" : ""} ${provisional ? "provisional" : ""} ${revealed ? "revealed" : ""} ${swiping ? "swiping" : ""}`}
       title={low ? line.note : undefined}
+      onPointerDownCapture={onRowPointerDown}
+      onPointerMoveCapture={onRowPointerMove}
+      onPointerUpCapture={onRowPointerEnd}
+      onPointerCancelCapture={onRowPointerEnd}
     >
-      <div
-        ref={ref}
-        className="latex"
-        style={scale < 1 ? { fontSize: `${BASE_FONT_REM * scale}rem` } : undefined}
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
       <button
-        className="line-mic"
-        title="Hold to edit this line by voice"
-        onPointerDown={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          e.currentTarget.setPointerCapture(e.pointerId);
-          onMicDown();
-        }}
-        onPointerUp={(e) => {
-          e.stopPropagation();
-          onMicUp();
-        }}
-        onContextMenu={(e) => e.preventDefault()}
+        className="line-delete"
+        onClick={() => onDelete()}
+        aria-hidden={!revealed}
+        tabIndex={revealed ? 0 : -1}
+        title="Delete line (Ctrl+Z to undo)"
       >
-        <MicGlyph />
+        X
       </button>
+      <div ref={bodyRef} className="line-body">
+        <div
+          ref={ref}
+          className="latex"
+          style={scale < 1 ? { fontSize: `${BASE_FONT_REM * scale}rem` } : undefined}
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+        <button
+          className="line-mic"
+          title="Hold to edit this line by voice"
+          onPointerDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            e.currentTarget.setPointerCapture(e.pointerId);
+            onMicDown();
+          }}
+          onPointerUp={(e) => {
+            e.stopPropagation();
+            onMicUp();
+          }}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <MicGlyph />
+        </button>
+      </div>
     </div>
   );
 }
@@ -245,6 +495,11 @@ export default function App() {
   const [targetIndex, setTargetIndex] = useState<number | undefined>(undefined);
   const [liveResult, setLiveResult] = useState<DictationResult | null>(null);
   const [provisionalFrom, setProvisionalFrom] = useState<number | null>(null);
+  // Background context for the LLM: `source` is what gets sent, the dialog
+  // drafts an edit of it. Opens on every page load, prefilled from storage.
+  const [source, setSource] = useState<string>(() => loadStoredContext());
+  const [contextOpen, setContextOpen] = useState(true);
+  const [contextDraft, setContextDraft] = useState<string>(() => loadStoredContext());
   const liveCoverageRef = useRef(0); // ms of audio covered by the last completed poll
   const liveTimer = useRef<number | null>(null);
   const liveInFlight = useRef(false);
@@ -254,12 +509,14 @@ export default function App() {
   useEffect(() => {
     targetRef.current = targetIndex;
   }, [targetIndex]);
-  const ctxRef = useRef<{ lines: { latex: string }[]; targetIndex?: number }>({ lines: [] });
-  ctxRef.current = { lines: lines.map((l) => ({ latex: l.latex })), targetIndex };
+  const ctxRef = useRef<CallContext>({ lines: [] });
+  ctxRef.current = { lines: lines.map((l) => ({ latex: l.latex })), targetIndex, source };
   const linesRef = useRef<Line[]>([]);
   linesRef.current = lines;
   const splitAttemptedRef = useRef<Set<string>>(new Set());
   const recorderRef = useRef<PushToTalk | null>(null);
+  const levelRef = useRef(0);
+  const cancelReqRef = useRef(false);
   const statusRef = useRef<Status>("idle");
   useEffect(() => {
     statusRef.current = status;
@@ -275,6 +532,7 @@ export default function App() {
 
   const start = useCallback(async () => {
     if (statusRef.current !== "idle") return;
+    cancelReqRef.current = false;
     setError("");
     setLiveResult(null);
     pollFailures.current = 0;
@@ -287,9 +545,24 @@ export default function App() {
       body: "{}",
     }).catch(() => {});
     const ptt = recorderRef.current ?? (recorderRef.current = new PushToTalk());
+    ptt.onLevel = (level) => {
+      levelRef.current = level;
+    };
+    levelRef.current = 0;
     warmVad(); // WASM compile happens during the user's hold, not after release
     try {
       await ptt.start();
+      if (cancelReqRef.current) {
+        // Cancelled while the mic was still opening (e.g. a swipe stole the
+        // gesture during the hold): tear the fresh take down again.
+        cancelReqRef.current = false;
+        try {
+          await ptt.stop();
+        } catch {
+          /* already stopped */
+        }
+        return;
+      }
       setStatus("listening");
       // Live transcription loop: re-transcribe the growing audio every 1.2s
       const poll = async () => {
@@ -361,7 +634,7 @@ export default function App() {
       }
       const wavAndPcm = await blobToWav(blob);
       const speechPromise = analyzeSpeech(wavAndPcm.pcm);
-      const ctx = { lines: lines.map((l) => ({ latex: l.latex })), targetIndex: target };
+      const ctx = { lines: lines.map((l) => ({ latex: l.latex })), targetIndex: target, source };
       const before = lines;
       let promotedAt: number | null = null;
 
@@ -460,7 +733,44 @@ export default function App() {
       setStatus("error");
       setError(e instanceof ConfigError ? e.message : (e as Error).message || "Something went wrong");
     }
-  }, [lines, liveResult, stopLivePolls]);
+  }, [lines, liveResult, source, stopLivePolls]);
+
+  // Discard the in-flight recording entirely (Wispr-style ✕, or a swipe
+  // stealing a mic hold): stop capture, drop the live preview, restore state.
+  const cancel = useCallback(() => {
+    // A start() may still be in flight (permission prompt, warm-up): flag it
+    // so it aborts instead of resurrecting a cancelled take.
+    cancelReqRef.current = true;
+    if (statusRef.current !== "listening" || !recorderRef.current) return;
+    stopLivePolls();
+    setPollWarning(false);
+    void recorderRef.current.stop().catch(() => {});
+    setTargetIndex(undefined);
+    setProvisionalFrom(null);
+    setLiveResult(null);
+    setStatus("idle");
+  }, [stopLivePolls]);
+
+  // Background-context dialog: save persists (and trims) the draft, "no
+  // context" clears it entirely; reopening prefills with what's active.
+  const saveContext = useCallback(() => {
+    const v = contextDraft.trim().slice(0, CONTEXT_MAX);
+    setSource(v);
+    storeContext(v);
+    setContextOpen(false);
+  }, [contextDraft]);
+
+  const skipContext = useCallback(() => {
+    setSource("");
+    storeContext("");
+    setContextDraft("");
+    setContextOpen(false);
+  }, []);
+
+  const openContextDialog = useCallback(() => {
+    setContextDraft(source);
+    setContextOpen(true);
+  }, [source]);
 
   // A solid line still overflows at the minimum font scale: ask the model to
   // split it into several shorter lines (split at relation signs) and swap it
@@ -524,6 +834,16 @@ export default function App() {
     });
   }, [lines]);
 
+  // Swipe-to-delete: remove one line, keep it reachable via undo
+  const deleteLine = useCallback((idx: number) => {
+    const before = linesRef.current;
+    if (idx < 0 || idx >= before.length) return;
+    setProvisionalFrom(null);
+    setPast((p) => [...p.slice(-49), before]);
+    setFuture([]);
+    setLines(before.filter((_, i) => i !== idx));
+  }, []);
+
   useEffect(() => {
     const isSpace = (e: KeyboardEvent) => e.code === "Space" || e.key === " ";
     const isUndo = (e: KeyboardEvent) =>
@@ -532,6 +852,7 @@ export default function App() {
       ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") ||
       ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "z");
     const onKeyDown = (e: KeyboardEvent) => {
+      if (contextOpen) return;
       if (isUndo(e)) {
         e.preventDefault();
         undo();
@@ -549,6 +870,7 @@ export default function App() {
       void start();
     };
     const onKeyUp = (e: KeyboardEvent) => {
+      if (contextOpen) return;
       if (!isSpace(e)) return;
       void finish();
     };
@@ -558,7 +880,7 @@ export default function App() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [start, finish, undo, redo]);
+  }, [contextOpen, start, finish, undo, redo]);
 
   const listening = status === "listening";
   const thinking = status === "thinking";
@@ -595,12 +917,15 @@ export default function App() {
                 line={line}
                 targeted={targetIndex === i}
                 provisional={provisionalFrom !== null && i >= provisionalFrom}
+                swipeEnabled={!listening && !thinking}
                 onMicDown={() => {
                   setTargetIndex(i);
                   void start();
                 }}
                 onMicUp={() => void finish()}
                 onOverflow={() => handleOverflow(line.latex)}
+                onDelete={() => deleteLine(i)}
+                onCancelDictation={cancel}
               />
             ))}
           </div>
@@ -618,6 +943,13 @@ export default function App() {
           </span>
         )}
         <div className="history">
+          <button
+            className={`ghost context-ghost ${source ? "has-context" : ""}`}
+            onClick={openContextDialog}
+            title="Background context for the AI"
+          >
+            <ContextGlyph />
+          </button>
           <button className="ghost" disabled={past.length === 0} onClick={undo} title="Undo (Ctrl+Z)">
             <ArrowGlyph />
           </button>
@@ -625,18 +957,47 @@ export default function App() {
             <ArrowGlyph mirrored />
           </button>
         </div>
-        <button
-          className={`pill ${listening ? "listening" : ""} ${thinking ? "thinking" : ""}`}
-          disabled={thinking}
-          onPointerDown={(e) => {
-            e.preventDefault();
-            e.currentTarget.setPointerCapture(e.pointerId);
-            void start();
-          }}
-          onPointerUp={() => void finish()}
-          onContextMenu={(e) => e.preventDefault()}
-          title={listening && targetIndex !== undefined ? `Editing line ${targetIndex + 1}` : undefined}
-        />
+        <div className="dictation">
+          {listening && (
+            <button
+              className="orb orb-cancel"
+              onClick={() => void cancel()}
+              title="Cancel — discard this recording"
+              aria-label="Cancel dictation"
+            >
+              <XGlyph />
+            </button>
+          )}
+          <button
+            className={`pill ${listening ? "listening" : ""} ${thinking ? "thinking" : ""}`}
+            disabled={thinking}
+            onPointerDown={(e) => {
+              e.preventDefault();
+              e.currentTarget.setPointerCapture(e.pointerId);
+              void start();
+            }}
+            onPointerUp={() => void finish()}
+            onContextMenu={(e) => e.preventDefault()}
+            aria-label="Hold to dictate"
+            title={listening && targetIndex !== undefined ? `Editing line ${targetIndex + 1}` : undefined}
+          >
+            {listening || thinking ? (
+              <Waveform level={levelRef} active={listening} />
+            ) : (
+              <MicGlyph size={20} />
+            )}
+          </button>
+          {listening && (
+            <button
+              className="orb orb-confirm"
+              onClick={() => void finish()}
+              title="Finish — transcribe now"
+              aria-label="Finish dictation"
+            >
+              <CheckGlyph />
+            </button>
+          )}
+        </div>
         {installMode === "install" && (
           <button className="install" onClick={install} title="Install MathTex as an app">
             <InstallGlyph />
@@ -651,6 +1012,34 @@ export default function App() {
           <button className="install-hint-dismiss" onClick={dismissInstall} title="Dismiss">
             ×
           </button>
+        </div>
+      )}
+      {contextOpen && (
+        <div className="context-overlay" role="dialog" aria-modal="true" aria-labelledby="context-title">
+          <div className="context-dialog">
+            <h2 id="context-title">Any context for the AI?</h2>
+            <p>
+              Paste anything that hints at what you're working on — text copied from Khan
+              Academy, LaTeX, or just a note. It helps the AI predict what comes next;
+              it's optional and never used to silently correct your math.
+            </p>
+            <textarea
+              className="context-input"
+              value={contextDraft}
+              onChange={(e) => setContextDraft(e.target.value)}
+              placeholder="e.g. the problem statement you copied, or the LaTeX of the previous steps…"
+              rows={6}
+              autoFocus
+            />
+            <div className="context-actions">
+              <button className="context-secondary" onClick={skipContext}>
+                No context
+              </button>
+              <button className="context-primary" onClick={saveContext}>
+                Save context
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

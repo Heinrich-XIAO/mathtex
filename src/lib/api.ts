@@ -14,6 +14,9 @@ export interface DictationResult {
 export interface CallContext {
   lines: { latex: string }[];
   targetIndex?: number;
+  /** Free-form background the student gave up front (Khan Academy copy, LaTeX,
+   * anything) — a prediction hint, never a license to correct their math. */
+  source?: string;
 }
 
 const BASE = import.meta.env.VITE_API_BASE_URL || "/api";
@@ -30,16 +33,20 @@ function mustConfig(): void {
 }
 
 function contextText(ctx: CallContext): string {
+  const background = (ctx.source ?? "").trim();
+  const backgroundText = background
+    ? `BACKGROUND CONTEXT (material the student is working from — a hint for prediction and disambiguation, never a license to correct their math):\n${background.slice(0, 4000)}\n\n`
+    : "";
   if (ctx.lines.length === 0) {
-    return "The file is empty. Listen to the audio and produce the JSON object.";
+    return `${backgroundText}The file is empty. Listen to the audio and produce the JSON object.`;
   }
   const numbered = ctx.lines
     .map((l, i) => `${i + 1}. ${l.latex || "(empty)"}`)
     .join("\n");
   if (ctx.targetIndex !== undefined && ctx.targetIndex >= 0 && ctx.targetIndex < ctx.lines.length) {
-    return `Current file lines (most recent last):\n${numbered}\n\nTARGET LINE: line ${ctx.targetIndex + 1} (${ctx.lines[ctx.targetIndex].latex}). The audio is an edit instruction for THIS line only. Listen to the audio and produce the JSON object.`;
+    return `${backgroundText}Current file lines (most recent last):\n${numbered}\n\nTARGET LINE: line ${ctx.targetIndex + 1} (${ctx.lines[ctx.targetIndex].latex}). The audio is an edit instruction for THIS line only. Listen to the audio and produce the JSON object.`;
   }
-  return `Current file lines (most recent last):\n${numbered}\n\nThe audio is NEW dictation to append after line ${ctx.lines.length} as a new line. Use "replace_line" only if the audio is an explicit edit command for an existing line. Listen to the audio and produce the JSON object.`;
+  return `${backgroundText}Current file lines (most recent last):\n${numbered}\n\nThe audio is NEW dictation to append after line ${ctx.lines.length} as a new line. It should relate naturally to the preceding lines and the background context. Use "replace_line" only if the audio is an explicit edit command for an existing line. Listen to the audio and produce the JSON object.`;
 }
 
 function arrayBufferToBase64(buf: ArrayBuffer): string {

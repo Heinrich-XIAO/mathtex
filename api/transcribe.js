@@ -10,7 +10,10 @@ const CONVERTER = process.env.CONSOLIDATOR_MODEL || "google/gemini-3.5-flash-lit
 
 export const config = { runtime: "edge" };
 
+const trunc = (s, n = 160) => (s.length > n ? `${s.slice(0, n)}…` : s);
+
 export default async function handler(request) {
+  const t0 = Date.now();
   if (!TARGET || !KEY) {
     return Response.json({ error: { message: "Missing UPSTREAM_BASE_URL or OPENROUTER_API_KEY" } }, { status: 500 });
   }
@@ -42,6 +45,7 @@ export default async function handler(request) {
     return Response.json({ error: { message: String(e).slice(0, 200) } }, { status: 502 });
   }
   if (!transcript) {
+    console.log(JSON.stringify({ route: "transcribe", model, transcript: "", ms: Date.now() - t0 }));
     return Response.json({ transcript: "", raw: "" });
   }
 
@@ -74,6 +78,9 @@ export default async function handler(request) {
     }
     const data = await res.json();
     const content = data.choices?.[0]?.message?.content ?? "";
+    console.log(
+      JSON.stringify({ route: "transcribe", model, transcript: trunc(transcript), raw: trunc(content), ms: Date.now() - t0 }),
+    );
     return Response.json({ transcript, raw: content });
   } catch (e) {
     return Response.json({ transcript, error: { message: String(e).slice(0, 200) } }, { status: 502 });

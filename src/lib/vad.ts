@@ -2,7 +2,9 @@ import * as ort from "onnxruntime-web/wasm";
 
 // Silero VAD (public/vad/silero_vad.onnx). Runs locally, ~1ms per 512-sample
 // frame via WASM. Analysis runs in parallel with the API call — never
-// sequentially — and a no-speech result discards the response at the end.
+// sequentially — and the verdict is advisory: finish() soft-gates on it
+// (confidence guard for low-speech clips) rather than discarding outright,
+// because Silero under-reports whispered speech buried in loud noise.
 // Calling convention matches @ricky0123/vad-web's proven Silero usage:
 // 512-sample frames with a rolling 64-sample context, state [2,1,128],
 // sr as an int64 tensor of dims [1].
@@ -31,10 +33,20 @@ export function warmVad(): void {
 
 const CHUNK = 512; // 32ms @ 16kHz
 const CONTEXT = 64;
+// Stock Silero bar is 0.5, tuned for normal voiced speech. Whispers carry no
+// fundamental frequency, so their probability lands well below it — 0.35 keeps
+// the frame counting for quiet speech while still rejecting bus-level noise.
+const SPEECH_PROB = 0.35;
 
 export interface SpeechAnalysis {
   ok: boolean;
   speechMs: number;
+  /** Highest per-frame speech probability Silero produced. */
+  maxProb: number;
+  /** Average per-frame speech probability across the whole clip. */
+  meanProb: number;
+  /** Total 32ms frames analyzed. */
+  frames: number;
 }
 
 export async function analyzeSpeech(
@@ -47,6 +59,9 @@ export async function analyzeSpeech(
     const sr = new ort.Tensor("int64", [BigInt(sampleRate)]);
     let context = new Float32Array(CONTEXT);
     let frames = 0;
+    let total = 0;
+    let maxProb = 0;
+    let sumProb = 0;
 
     for (let off = 0; off + CHUNK <= pcm.length; off += CHUNK) {
       const frame = pcm.slice(off, off + CHUNK);
@@ -60,11 +75,21 @@ export async function analyzeSpeech(
       });
       if (!out["stateN"] || !out["output"]) throw new Error("Silero returned no state");
       state = out["stateN"];
-      if ((out["output"].data as Float32Array)[0] > 0.5) frames++;
+      const prob = (out["output"].data as Float32Array)[0];
+      if (prob > SPEECH_PROB) frames++;
+      if (prob > maxProb) maxProb = prob;
+      sumProb += prob;
+      total++;
       context = frame.slice(-CONTEXT);
     }
-    return { ok: true, speechMs: Math.round((frames * CHUNK * 1000) / sampleRate) };
+    return {
+      ok: true,
+      speechMs: Math.round((frames * CHUNK * 1000) / sampleRate),
+      maxProb: Math.round(maxProb * 1000) / 1000,
+      meanProb: total > 0 ? Math.round((sumProb / total) * 1000) / 1000 : 0,
+      frames,
+    };
   } catch {
-    return { ok: false, speechMs: 0 };
+    return { ok: false, speechMs: 0, maxProb: 0, meanProb: 0, frames: 0 };
   }
 }

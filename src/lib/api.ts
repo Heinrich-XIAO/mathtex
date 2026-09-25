@@ -113,7 +113,7 @@ function parseResult(raw: string): DictationResult {  const obj = JSON.parse(str
 export async function dictate(
   wav: ArrayBuffer,
   ctx: CallContext,
-  opts?: { signal?: AbortSignal },
+  opts?: { signal?: AbortSignal; vadStats?: string },
 ): Promise<DictationResult> {
   return dictateAudioLlm(wav, ctx, opts);
 }
@@ -176,7 +176,7 @@ export async function liveConvert(
 async function dictateAudioLlm(
   wav: ArrayBuffer,
   ctx: CallContext,
-  opts?: { signal?: AbortSignal },
+  opts?: { signal?: AbortSignal; vadStats?: string },
 ): Promise<DictationResult> {
   mustConfig();
   const signal = opts?.signal;
@@ -198,6 +198,9 @@ async function dictateAudioLlm(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        // Client-side VAD diagnostics for the server logs; stripped by the
+        // proxy before forwarding upstream.
+        ...(opts?.vadStats ? { "x-vad-stats": opts.vadStats.slice(0, 300) } : {}),
       },
       body: JSON.stringify({
         model: MODEL,

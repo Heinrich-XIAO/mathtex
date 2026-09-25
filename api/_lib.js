@@ -6,6 +6,8 @@
 const TARGET = process.env.UPSTREAM_BASE_URL;
 
 export async function proxy(request, subpath) {
+  const t0 = Date.now();
+  const vad = request.headers.get("x-vad-stats") || undefined;
   const key = process.env.OPENROUTER_API_KEY;
   if (!TARGET || !key) {
     return new Response(
@@ -22,10 +24,13 @@ export async function proxy(request, subpath) {
   const qs = params.size ? `?${params}` : "";
 
   let body;
+  let model;
   if (request.method !== "GET" && request.method !== "HEAD") {
     const raw = await request.text();
     try {
-      body = JSON.stringify(JSON.parse(raw));
+      const parsed = JSON.parse(raw);
+      model = typeof parsed?.model === "string" ? parsed.model : undefined;
+      body = JSON.stringify(parsed);
     } catch {
       body = raw; // forward as-is (e.g. warm-up "{}" pings)
     }
@@ -41,11 +46,24 @@ export async function proxy(request, subpath) {
       body,
     });
 
+    console.log(
+      JSON.stringify({
+        route: subpath,
+        model,
+        vad,
+        status: upstream.status,
+        ms: Date.now() - t0,
+      }),
+    );
+
     const headers = new Headers();
     const ct = upstream.headers.get("content-type");
     if (ct) headers.set("Content-Type", ct);
     return new Response(upstream.body, { status: upstream.status, headers });
   } catch (e) {
+    console.log(
+      JSON.stringify({ route: subpath, model, vad, error: String(e).slice(0, 200), ms: Date.now() - t0 }),
+    );
     return new Response(
       JSON.stringify({ error: { message: `Upstream error: ${String(e).slice(0, 200)}` } }),
       { status: 502, headers: { "Content-Type": "application/json" } },

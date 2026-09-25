@@ -81,6 +81,10 @@ function useFitScale(
   return state;
 }
 
+/** Belt-and-braces for clips the VAD couldn't confirm: noise reaches the
+ * model too, and a mutating result from it must be confident to land. */
+const LOW_VAD_MIN_CONFIDENCE = 0.5;
+
 function applyResult(lines: Line[], r: DictationResult, targetIndex?: number): Line[] {
   switch (r.mode) {
     case "append":
@@ -244,6 +248,8 @@ export default function App() {
   const liveCoverageRef = useRef(0); // ms of audio covered by the last completed poll
   const liveTimer = useRef<number | null>(null);
   const liveInFlight = useRef(false);
+  const pollFailures = useRef(0);
+  const [pollWarning, setPollWarning] = useState(false);
   const targetRef = useRef<number | undefined>(undefined);
   useEffect(() => {
     targetRef.current = targetIndex;
@@ -271,6 +277,8 @@ export default function App() {
     if (statusRef.current !== "idle") return;
     setError("");
     setLiveResult(null);
+    pollFailures.current = 0;
+    setPollWarning(false);
     liveCoverageRef.current = 0;
     // Warm the serverless function while the user is speaking (fire-and-forget)
     void fetch("/api/chat/completions", {
@@ -300,9 +308,14 @@ export default function App() {
                   setLiveResult(null); // noop / delete_last / clear by voice
                 }
               }
+              pollFailures.current = 0;
+              setPollWarning(false);
             }
           } catch {
-            /* transient — next poll retries */
+            pollFailures.current += 1;
+            if (pollFailures.current >= 2 && statusRef.current === "listening") {
+              setPollWarning(true);
+            }
           }
           liveInFlight.current = false;
         }
@@ -329,8 +342,8 @@ export default function App() {
   const finish = useCallback(async () => {
     if (statusRef.current !== "listening" || !recorderRef.current) return;
     stopLivePolls();
+    setPollWarning(false);
     const target = targetRef.current;
-    stopLivePolls();
     setStatus("thinking");
     try {
       const { blob, durationMs, peak } = await recorderRef.current.stop();
@@ -339,6 +352,9 @@ export default function App() {
       const minDuration = isTargetedEdit ? 800 : 400;
       const minPeak = isTargetedEdit ? 0.09 : 0.06;
       if (durationMs < minDuration || peak < minPeak) {
+        console.info(
+          `[dictation] discard-blank dur=${durationMs}ms peak=${peak.toFixed(3)}`,
+        );
         setTargetIndex(undefined);
         setStatus("idle");
         return;
@@ -368,27 +384,72 @@ export default function App() {
         }
       }
 
-      // 2) VAD verdict: no speech -> remove the provisional, done
+      // 2) VAD verdict — advisory, never a hard gate. Silero under-reports
+      //    whispered speech (no f0), especially under bus noise, so a low
+      //    speechMs no longer discards the clip: it still goes to the LLM,
+      //    which transcribes intelligible whispers and noops on pure noise.
+      //    Only the confidence guard in step 3 can still throw it away.
       const speech = await speechPromise;
       const minSpeechMs = target !== undefined ? 600 : 350;
-      if (speech.ok && speech.speechMs < minSpeechMs) {
-        if (promotedAt !== null) setLines(before);
+      const vadConfirmed = !speech.ok || speech.speechMs >= minSpeechMs;
+      const vadStats = speech.ok
+        ? `speech=${speech.speechMs}ms/${speech.frames}fr max=${speech.maxProb.toFixed(3)} mean=${speech.meanProb.toFixed(3)}`
+        : "vad=err";
+      console.info(`[dictation] dur=${durationMs}ms peak=${peak.toFixed(3)} ${vadStats} ${vadConfirmed ? "vad-ok" : "vad-low"}`);
+
+      // 3) Authoritative finalize: the audio-LLM hears the full clip and
+      //    replaces the provisional with the accurate result. One retry —
+      //    transient 429/5xx/network blips are common; a short backoff first.
+      let final: DictationResult | null = null;
+      let finalErr: unknown = null;
+      try {
+        final = await dictate(wavAndPcm.wav, ctx, { vadStats });
+      } catch (e) {
+        finalErr = e;
+        await new Promise((r) => setTimeout(r, 700));
+        try {
+          final = await dictate(wavAndPcm.wav, ctx, { vadStats });
+          finalErr = null;
+        } catch (e2) {
+          finalErr = e2;
+        }
+      }
+      const describe = (e: unknown) => (e instanceof Error ? e.message : String(e));
+      if (final) {
+        // 3b) Confidence guard for low-VAD clips: hallucinated edits from
+        //    noise come back unsure — only confident mutations may land.
+        //    noop is harmless either way; vad-ok clips skip the guard.
+        const guardRejects =
+          !vadConfirmed &&
+          final.mode !== "noop" &&
+          final.confidence < LOW_VAD_MIN_CONFIDENCE;
+        console.info(
+          `[dictation] final mode=${final.mode} conf=${final.confidence.toFixed(2)}${
+            guardRejects ? " discard-guard" : ""
+          }`,
+        );
+        if (guardRejects) {
+          if (promotedAt !== null) setLines(before);
+          setProvisionalFrom(null);
+          setTargetIndex(undefined);
+          setLiveResult(null);
+          setStatus("idle");
+          return;
+        }
+        setProvisionalFrom(null);
+        setLines((prev) => applyResult(promotedAt !== null ? before : prev, final, target));
+      } else if (promotedAt !== null) {
+        // Keep the promoted provisional as a solid line, but say why it's unconfirmed
+        setProvisionalFrom(null);
+        setError(`Finalize failed — kept the live preview: ${describe(finalErr)}`);
+      } else {
+        // No provisional existed: without this the attempt would vanish silently
         setProvisionalFrom(null);
         setTargetIndex(undefined);
         setLiveResult(null);
-        setStatus("idle");
+        setStatus("error");
+        setError(`Finalize failed: ${describe(finalErr)}`);
         return;
-      }
-
-      // 3) Authoritative finalize: the audio-LLM hears the full clip and
-      //    replaces the provisional with the accurate result
-      try {
-        const final = await dictate(wavAndPcm.wav, ctx);
-        setProvisionalFrom(null);
-        setLines((prev) => applyResult(promotedAt !== null ? before : prev, final, target));
-      } catch {
-        // finalize failed: keep the provisional as a solid line
-        setProvisionalFrom(null);
       }
       setTargetIndex(undefined);
       setLiveResult(null);
@@ -551,6 +612,11 @@ export default function App() {
       </main>
 
       <footer className="footer">
+        {pollWarning && listening && (
+          <span className="poll-warning" role="status">
+            live preview unavailable — still recording
+          </span>
+        )}
         <div className="history">
           <button className="ghost" disabled={past.length === 0} onClick={undo} title="Undo (Ctrl+Z)">
             <ArrowGlyph />

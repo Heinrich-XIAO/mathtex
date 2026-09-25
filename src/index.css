@@ -185,6 +185,20 @@ body {
   padding: 10px 0 30px;
 }
 
+.poll-warning {
+  position: absolute;
+  top: -14px;
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-size: 0.72rem;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--amber) 14%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--amber) 35%, transparent);
+  border-radius: 8px;
+  padding: 4px 10px;
+}
+
 /* Bottom-left ghost undo/redo */
 .history {
   position: absolute;

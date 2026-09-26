@@ -112,6 +112,66 @@ body {
   -webkit-user-select: none;
 }
 
+/* Verdict actions, revealed left of delete by swiping the row left */
+.line-wrong,
+.line-correct,
+.line-verdict-unmark {
+  position: absolute;
+  bottom: 0;
+  width: 76px;
+  border: none;
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 700;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 150ms, background 120ms;
+}
+
+/* Unmarked row: Wrong then Correct side by side */
+.line-wrong {
+  top: 0;
+  right: 76px;
+  background: color-mix(in srgb, var(--amber) 20%, var(--card));
+  color: var(--amber);
+}
+
+.line-correct {
+  top: 0;
+  right: 0;
+  background: color-mix(in srgb, #6fbf73 20%, var(--card));
+  color: #6fbf73;
+}
+
+/* Verdict rows: single Unmark button where Wrong/Correct used to sit */
+.line-verdict-unmark {
+  top: 0;
+  right: 0;
+  width: 152px;
+  background: color-mix(in srgb, var(--muted) 20%, var(--card));
+  color: var(--muted);
+}
+
+.line.verdict-wrong .line-verdict-unmark {
+  background: color-mix(in srgb, var(--red) 20%, var(--card));
+  color: var(--red);
+}
+
+.line.verdict-correct .line-verdict-unmark {
+  background: color-mix(in srgb, #6fbf73 20%, var(--card));
+  color: #6fbf73;
+}
+
+/* Subtle at-a-glance markers for marked lines */
+.line.verdict-wrong {
+  box-shadow: inset 3px 0 0 var(--red);
+}
+.line.verdict-correct {
+  box-shadow: inset 3px 0 0 #6fbf73;
+}
+
 /* Delete action revealed by swiping the row left; hidden until it peeks out */
 .line-delete {
   position: absolute;
@@ -133,7 +193,13 @@ body {
 }
 
 .line.revealed .line-delete,
-.line.swiping .line-delete {
+.line.revealed .line-wrong,
+.line.revealed .line-correct,
+.line.revealed .line-verdict-unmark,
+.line.swiping .line-delete,
+.line.swiping .line-wrong,
+.line.swiping .line-correct,
+.line.swiping .line-verdict-unmark {
   opacity: 1;
   pointer-events: auto;
 }
@@ -144,6 +210,26 @@ body {
 
 .line-delete:active {
   background: color-mix(in srgb, var(--red) 44%, var(--card));
+}
+
+.line-wrong:hover {
+  background: color-mix(in srgb, var(--amber) 32%, var(--card));
+}
+
+.line-wrong:active {
+  background: color-mix(in srgb, var(--amber) 44%, var(--card));
+}
+
+.line-correct:hover {
+  background: color-mix(in srgb, #6fbf73 32%, var(--card));
+}
+
+.line-correct:active {
+  background: color-mix(in srgb, #6fbf73 44%, var(--card));
+}
+
+.line-verdict-unmark:hover {
+  filter: brightness(1.15);
 }
 
 .line .latex {

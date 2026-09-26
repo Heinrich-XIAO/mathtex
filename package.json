@@ -6,11 +6,12 @@
   "scripts": {
     "dev": "vite",
     "deploy": "vite build && vite preview --host --port 4173",
-    "build": "tsc -b && vite build",
+    "build": "convex deploy --cmd 'tsc -b && vite build' && echo 'convex deployed'",
     "lint": "oxlint",
     "preview": "vite preview"
   },
   "dependencies": {
+    "convex": "^1.46.0",
     "katex": "^0.18.7",
     "onnxruntime-web": "^1.30.0",
     "react": "^19.2.8",

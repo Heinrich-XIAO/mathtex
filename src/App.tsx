@@ -20,11 +20,20 @@ import {
   type CallContext,
   type DictationResult,
 } from "./lib/api";
+import {
+  markCorrect,
+  markWrong,
+  unmarkCorrect,
+  unmarkWrong,
+  uploadTake,
+} from "./lib/persist";
 import { useInstall } from "./lib/install";
 
 type Status = "idle" | "listening" | "thinking" | "error";
 
 interface Line {
+  id: string;
+  takeId: string;
   latex: string;
   transcript: string;
   confidence: number;
@@ -106,12 +115,27 @@ function useFitScale(
  * model too, and a mutating result from it must be confident to land. */
 const LOW_VAD_MIN_CONFIDENCE = 0.5;
 
-function applyResult(lines: Line[], r: DictationResult, targetIndex?: number): Line[] {
+function uid(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function applyResult(
+  lines: Line[],
+  r: DictationResult,
+  targetIndex?: number,
+  takeId?: string,
+): Line[] {
   switch (r.mode) {
     case "append":
     case "append_lines": {
       if (r.lines.length === 0) return lines;
+      const tid = takeId ?? uid();
       const newLines = r.lines.map((latex) => ({
+        id: uid(),
+        takeId: tid,
         latex,
         transcript: r.transcript,
         confidence: r.confidence,
@@ -127,6 +151,8 @@ function applyResult(lines: Line[], r: DictationResult, targetIndex?: number): L
       if (idx < 0 || r.lines.length === 0) return lines;
       const next = [...lines];
       next[idx] = {
+        id: uid(),
+        takeId: takeId ?? uid(),
         latex: r.lines[0],
         transcript: r.transcript || lines[idx].transcript,
         confidence: r.confidence,
@@ -292,28 +318,33 @@ function PendingEquation({ latex }: { latex: string }) {
   );
 }
 
-// Width of the delete action revealed by swiping a line left
-const SWIPE_REVEAL = 76;
+// Combined width of the delete + verdict actions revealed by swiping left.
+// Two verdict buttons when unmarked, one Unmark when a verdict is set.
+const SWIPE_REVEAL = 152;
 
 function LineView({
   line,
   targeted,
   provisional,
+  verdict,
   swipeEnabled,
   onMicDown,
   onMicUp,
   onOverflow,
   onDelete,
+  onSetVerdict,
   onCancelDictation,
 }: {
   line: Line;
   targeted: boolean;
   provisional: boolean;
+  verdict: "wrong" | "correct" | undefined;
   swipeEnabled: boolean;
   onMicDown: () => void;
   onMicUp: () => void;
   onOverflow?: () => void;
   onDelete: () => void;
+  onSetVerdict: (verdict: "wrong" | "correct" | undefined) => void;
   onCancelDictation: () => void;
 }) {
   const html = useMemo(
@@ -441,13 +472,45 @@ function LineView({
 
   return (
     <div
-      className={`line ${low ? "low" : ""} ${targeted ? "targeted" : ""} ${provisional ? "provisional" : ""} ${revealed ? "revealed" : ""} ${swiping ? "swiping" : ""}`}
+      className={`line ${low ? "low" : ""} ${verdict ? `verdict-${verdict}` : ""} ${targeted ? "targeted" : ""} ${provisional ? "provisional" : ""} ${revealed ? "revealed" : ""} ${swiping ? "swiping" : ""}`}
       title={low ? line.note : undefined}
       onPointerDownCapture={onRowPointerDown}
       onPointerMoveCapture={onRowPointerMove}
       onPointerUpCapture={onRowPointerEnd}
       onPointerCancelCapture={onRowPointerEnd}
     >
+      {verdict ? (
+        <button
+          className="line-verdict-unmark"
+          onClick={() => onSetVerdict(undefined)}
+          aria-hidden={!revealed}
+          tabIndex={revealed ? 0 : -1}
+          title={verdict === "wrong" ? "Unmark wrong" : "Unmark correct"}
+        >
+          Unmark
+        </button>
+      ) : (
+        <>
+          <button
+            className="line-wrong"
+            onClick={() => onSetVerdict("wrong")}
+            aria-hidden={!revealed}
+            tabIndex={revealed ? 0 : -1}
+            title="Mark as wrong"
+          >
+            Wrong
+          </button>
+          <button
+            className="line-correct"
+            onClick={() => onSetVerdict("correct")}
+            aria-hidden={!revealed}
+            tabIndex={revealed ? 0 : -1}
+            title="Mark as correct"
+          >
+            Correct
+          </button>
+        </>
+      )}
       <button
         className="line-delete"
         onClick={() => onDelete()}
@@ -490,6 +553,10 @@ export default function App() {
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState("");
   const [lines, setLines] = useState<Line[]>([]);
+  // Verdicts live outside the undo history on purpose: Ctrl+Z never
+  // reverts a mark, the swipe button's Unmark is the only way to clear one.
+  // "wrong" | "correct" | undefined per line id.
+  const [verdicts, setVerdicts] = useState<Record<string, "wrong" | "correct" | undefined>>({});
   const [past, setPast] = useState<Line[][]>([]);
   const [future, setFuture] = useState<Line[][]>([]);
   const [targetIndex, setTargetIndex] = useState<number | undefined>(undefined);
@@ -634,6 +701,7 @@ export default function App() {
       }
       const wavAndPcm = await blobToWav(blob);
       const speechPromise = analyzeSpeech(wavAndPcm.pcm);
+      const takeId = uid();
       const ctx = { lines: lines.map((l) => ({ latex: l.latex })), targetIndex: target, source };
       const before = lines;
       let promotedAt: number | null = null;
@@ -643,7 +711,7 @@ export default function App() {
         liveResult &&
         (liveResult.mode === "append" || liveResult.mode === "append_lines" || liveResult.mode === "replace_line")
       ) {
-        const next = applyResult(before, liveResult, target);
+        const next = applyResult(before, liveResult, target, takeId);
         if (next !== before) {
           setPast((p) => [...p.slice(-49), before]);
           setFuture([]);
@@ -710,11 +778,24 @@ export default function App() {
           return;
         }
         setProvisionalFrom(null);
-        setLines((prev) => applyResult(promotedAt !== null ? before : prev, final, target));
+        setLines((prev) => applyResult(promotedAt !== null ? before : prev, final, target, takeId));
+        // Upload every take's audio immediately, whatever the line's fate
+        void uploadTake(takeId, wavAndPcm.wav, {
+          latex: final.lines[0] ?? "",
+          transcript: final.transcript,
+          note: final.note,
+          confidence: final.confidence,
+        });
       } else if (promotedAt !== null) {
         // Keep the promoted provisional as a solid line, but say why it's unconfirmed
         setProvisionalFrom(null);
         setError(`Finalize failed — kept the live preview: ${describe(finalErr)}`);
+        void uploadTake(takeId, wavAndPcm.wav, {
+          latex: liveResult?.lines[0] ?? "",
+          transcript: liveResult?.transcript ?? "",
+          note: liveResult?.note ?? "",
+          confidence: liveResult?.confidence ?? 0,
+        });
       } else {
         // No provisional existed: without this the attempt would vanish silently
         setProvisionalFrom(null);
@@ -797,6 +878,8 @@ export default function App() {
           idx,
           1,
           ...parts.map((l) => ({
+            id: uid(),
+            takeId: orig.takeId,
             latex: l,
             transcript: orig.transcript,
             confidence: orig.confidence,
@@ -842,7 +925,34 @@ export default function App() {
     setPast((p) => [...p.slice(-49), before]);
     setFuture([]);
     setLines(before.filter((_, i) => i !== idx));
+    // The wrong-flag record survives in the database by design
   }, []);
+
+  // Set a line's verdict ("wrong" or "correct"), or clear it with undefined.
+  // Ctrl+Z never touches verdicts — the swipe button's Unmark is the only
+  // way to clear one, after which either mark is available again.
+  const setVerdict = useCallback(
+    (idx: number, verdict: "wrong" | "correct" | undefined) => {
+      const line = linesRef.current[idx];
+      if (!line) return;
+      const meta = {
+        latex: line.latex,
+        transcript: line.transcript,
+        note: line.note,
+        confidence: line.confidence,
+      };
+      setVerdicts((prev) => ({ ...prev, [line.id]: verdict }));
+      if (verdict === undefined) {
+        void unmarkWrong(line.id);
+        void unmarkCorrect(line.id);
+      } else if (verdict === "wrong") {
+        void markWrong(line.id, line.takeId, meta);
+      } else {
+        void markCorrect(line.id, line.takeId, meta);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     const isSpace = (e: KeyboardEvent) => e.code === "Space" || e.key === " ";
@@ -913,10 +1023,11 @@ export default function App() {
           <div className="lines">
             {lines.map((line, i) => (
               <LineView
-                key={i}
+                key={line.id}
                 line={line}
                 targeted={targetIndex === i}
                 provisional={provisionalFrom !== null && i >= provisionalFrom}
+                verdict={verdicts[line.id]}
                 swipeEnabled={!listening && !thinking}
                 onMicDown={() => {
                   setTargetIndex(i);
@@ -925,6 +1036,8 @@ export default function App() {
                 onMicUp={() => void finish()}
                 onOverflow={() => handleOverflow(line.latex)}
                 onDelete={() => deleteLine(i)}
+                onSetVerdict={(v) => setVerdict(i, v)}
+
                 onCancelDictation={cancel}
               />
             ))}

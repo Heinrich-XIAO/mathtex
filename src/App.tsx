@@ -319,8 +319,9 @@ function PendingEquation({ latex }: { latex: string }) {
 }
 
 // Combined width of the delete + verdict actions revealed by swiping left.
-// Two verdict buttons when unmarked, one Unmark when a verdict is set.
-const SWIPE_REVEAL = 152;
+// Unmarked row: Wrong + Correct + X. Marked row: single Unmark + X.
+const SWIPE_REVEAL_UNMARKED = 228;
+const SWIPE_REVEAL_MARKED = 152;
 
 function LineView({
   line,
@@ -361,6 +362,7 @@ function LineView({
     onOverflow();
   }, [overflows, provisional, onOverflow, line.latex]);
   const low = line.confidence < LOW_CONFIDENCE;
+  const reveal = verdict ? SWIPE_REVEAL_MARKED : SWIPE_REVEAL_UNMARKED;
 
   // Swipe-left-to-delete: the row body tracks the pointer horizontally,
   // revealing an X action anchored at the right edge. Transform is written
@@ -395,6 +397,14 @@ function LineView({
     setRevealed(false);
     setBody(0, false);
   }, [line.latex, setBody]);
+
+  // Marking/unmarking while the row is open swaps the action layout —
+  // re-snap so the reveal hugs the new button column exactly.
+  useEffect(() => {
+    if (!revealed) return;
+    offsetRef.current = -reveal;
+    setBody(-reveal, true);
+  }, [revealed, reveal, setBody]);
 
   // A press anywhere outside an open row closes it
   useEffect(() => {
@@ -447,7 +457,7 @@ function LineView({
       e.currentTarget.setPointerCapture(e.pointerId);
       setSwiping(true);
     }
-    const next = Math.min(0, Math.max(-SWIPE_REVEAL, d.base + dx));
+    const next = Math.min(0, Math.max(-reveal, d.base + dx));
     const dt = e.timeStamp - d.lastT;
     if (dt > 0) d.vx = (e.clientX - d.lastX) / dt;
     d.lastX = e.clientX;
@@ -464,8 +474,8 @@ function LineView({
     d.active = false;
     setSwiping(false);
     // Snap open past a third of the reveal, or on a quick leftward flick
-    const open = offsetRef.current < -SWIPE_REVEAL / 3 || d.vx < -0.5;
-    offsetRef.current = open ? -SWIPE_REVEAL : 0;
+    const open = offsetRef.current < -reveal / 3 || d.vx < -0.5;
+    offsetRef.current = open ? -reveal : 0;
     setBody(offsetRef.current, true);
     setRevealed(open);
   };
@@ -563,9 +573,9 @@ export default function App() {
   const [liveResult, setLiveResult] = useState<DictationResult | null>(null);
   const [provisionalFrom, setProvisionalFrom] = useState<number | null>(null);
   // Background context for the LLM: `source` is what gets sent, the dialog
-  // drafts an edit of it. Opens on every page load, prefilled from storage.
+  // drafts an edit of it. Never opens on its own — only via the footer ghost.
   const [source, setSource] = useState<string>(() => loadStoredContext());
-  const [contextOpen, setContextOpen] = useState(true);
+  const [contextOpen, setContextOpen] = useState(false);
   const [contextDraft, setContextDraft] = useState<string>(() => loadStoredContext());
   const liveCoverageRef = useRef(0); // ms of audio covered by the last completed poll
   const liveTimer = useRef<number | null>(null);

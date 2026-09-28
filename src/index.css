@@ -130,26 +130,26 @@ body {
   transition: opacity 150ms, background 120ms;
 }
 
-/* Unmarked row: Wrong then Correct side by side */
+/* Unmarked row: Wrong, Correct, then Delete at the right edge */
 .line-wrong {
   top: 0;
-  right: 76px;
+  right: 152px;
   background: color-mix(in srgb, var(--amber) 20%, var(--card));
   color: var(--amber);
 }
 
 .line-correct {
   top: 0;
-  right: 0;
+  right: 76px;
   background: color-mix(in srgb, #6fbf73 20%, var(--card));
   color: #6fbf73;
 }
 
-/* Verdict rows: single Unmark button where Wrong/Correct used to sit */
+/* Verdict rows: single Unmark button where Correct used to sit */
 .line-verdict-unmark {
   top: 0;
-  right: 0;
-  width: 152px;
+  right: 76px;
+  width: 76px;
   background: color-mix(in srgb, var(--muted) 20%, var(--card));
   color: var(--muted);
 }

@@ -53,6 +53,7 @@ PHRASE GLOSSARY (spoken -> LaTeX):
 - "plus or minus" -> \\\\pm; "times" -> \\\\cdot (or juxtaposition if natural)
 - "infinity" -> \\\\infty; "in" -> \\\\in; "element of" -> \\\\in
 - "x is less than or equal to y" -> x \\\\le y; "approximately equal" -> \\\\approx
+- "would mean" / "which means" / "which implies" / "implies that" -> \\\\implies (e.g. "x^4 = 0 would mean x = 0" -> x^4 = 0 \\\\implies x = 0)
 - "sine of x" -> \\\\sin x; "log base 2 of x" -> \\\\log_{2} x; "natural log of x" -> \\\\ln x
 - "matrix" phrases: describe simply with pmatrix/bmatrix when spelled out (e.g. "2 by 2 matrix").
 

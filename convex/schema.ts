@@ -24,6 +24,9 @@ export default defineSchema({
     note: v.string(),
     confidence: v.number(),
     markedAt: v.number(),
+    // The student's spoken explanation of what is wrong, captured right
+    // after the wrong-swipe. Optional: marks can land before speech does.
+    reason: v.optional(v.string()),
   })
     .index("by_lineId", ["lineId"])
     .index("by_takeId", ["takeId"]),

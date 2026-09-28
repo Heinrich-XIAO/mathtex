@@ -1,4 +1,4 @@
-import { SYSTEM_PROMPT, SPLIT_PROMPT } from "./prompt";
+import { SYSTEM_PROMPT, REASON_PROMPT } from "./prompt";
 import { pcmToWav } from "./wav";
 
 export type Mode = "append" | "append_lines" | "replace_line" | "delete_last" | "noop";
@@ -125,31 +125,42 @@ export async function dictate(
   return dictateAudioLlm(wav, ctx, opts);
 }
 
-/** Ask the LLM to split one over-wide LaTeX line into several shorter lines. */
-export async function splitLine(latex: string): Promise<string[]> {
+export const liveTranscriptionEnabled = (): boolean => LIVE_TRANSCRIBE_MODEL.length > 0;
+
+/** Transcribe the "what's wrong" reason clip verbatim — no math conversion. */
+export async function transcribeReason(wav: ArrayBuffer): Promise<string> {
+  mustConfig();
   const res = await fetch(`${BASE}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: MODEL,
       temperature: 0,
-      max_tokens: 400,
+      max_tokens: 200,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: SPLIT_PROMPT },
-        { role: "user", content: latex },
+        { role: "system", content: REASON_PROMPT },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "The student just marked a math line wrong. Transcribe what they said is wrong with it." },
+            { type: "input_audio", input_audio: { data: arrayBufferToBase64(wav), format: "wav" } },
+          ],
+        },
       ],
     }),
   });
-  if (!res.ok) throw new Error(`split ${res.status}`);
+  if (!res.ok) throw new Error(`API ${res.status}`);
   const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
   const content = data.choices?.[0]?.message?.content ?? "";
-  const obj = parseJsonLenient(stripFences(content)) as { lines?: unknown };
-  if (!Array.isArray(obj.lines)) throw new Error("split: missing lines array");
-  return obj.lines.filter((l): l is string => typeof l === "string" && l.trim().length > 0);
+  try {
+    const obj = parseJsonLenient(stripFences(content)) as { reason?: unknown };
+    if (typeof obj.reason === "string" && obj.reason.trim()) return obj.reason.trim();
+  } catch {
+    /* fall through to raw text */
+  }
+  return content.trim().slice(0, 400);
 }
-
-export const liveTranscriptionEnabled = (): boolean => LIVE_TRANSCRIBE_MODEL.length > 0;
 
 /** Live poll during hold: transcribe the clip, convert to LaTeX, return both. */
 export async function liveConvert(

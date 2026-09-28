@@ -1,11 +1,9 @@
 import {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
-  type RefObject,
 } from "react";
 import katex from "katex";
 import { PushToTalk } from "./lib/recorder";
@@ -15,7 +13,7 @@ import {
   dictate,
   liveConvert,
   liveTranscriptionEnabled,
-  splitLine,
+  transcribeReason,
   ConfigError,
   type CallContext,
   type DictationResult,
@@ -23,6 +21,7 @@ import {
 import {
   markCorrect,
   markWrong,
+  setWrongReason,
   unmarkCorrect,
   unmarkWrong,
   uploadTake,
@@ -61,56 +60,6 @@ function storeContext(v: string): void {
     /* private mode: context just won't persist */
   }
 }
-// .line .latex sets font-size: 1.3rem in CSS; keep the two in sync
-const BASE_FONT_REM = 1.3;
-// Below this scale a line is considered over-wide even after shrinking
-const MIN_SCALE = 0.6;
-
-/**
- * Shrink-to-fit: measure the natural (unscaled) KaTeX width against the
- * container and return a font scale in [MIN_SCALE, 1]. Measurement is
- * feedback-free — the scale is derived from the natural width, not the
- * currently-scaled width, so it cannot oscillate.
- */
-function useFitScale(
-  ref: RefObject<HTMLDivElement | null>,
-  html: string,
-): { scale: number; overflows: boolean } {
-  const [state, setState] = useState({ scale: 1, overflows: false });
-  const scaleRef = useRef(1);
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const measure = () => {
-      const katexEl = el.querySelector(".katex") as HTMLElement | null;
-      if (!katexEl) return;
-      // .katex is an inline-block: its width is the natural content width,
-      // which scales linearly with font-size
-      const natural = katexEl.offsetWidth / scaleRef.current;
-      const avail = el.clientWidth;
-      if (avail <= 0 || natural <= 0) return;
-      const raw = avail / natural;
-      // 0.5% granularity so rounding can't thrash the scale back and forth
-      const next = Math.round(Math.max(MIN_SCALE, Math.min(1, raw)) * 200) / 200;
-      if (next !== scaleRef.current) {
-        scaleRef.current = next;
-        setState({ scale: next, overflows: raw < MIN_SCALE });
-      } else {
-        setState((s) => (s.overflows === raw < MIN_SCALE ? s : { ...s, overflows: raw < MIN_SCALE }));
-      }
-    };
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    window.addEventListener("resize", measure);
-    return () => {
-      ro.disconnect();
-      window.removeEventListener("resize", measure);
-    };
-  }, [html, ref]);
-  return state;
-}
-
 /** Belt-and-braces for clips the VAD couldn't confirm: noise reaches the
  * model too, and a mutating result from it must be confident to land. */
 const LOW_VAD_MIN_CONFIDENCE = 0.5;
@@ -224,12 +173,12 @@ function ContextGlyph() {
   );
 }
 
-function XGlyph() {
+function XGlyph({ size = 18 }: { size?: number }) {
   return (
     <svg
       viewBox="0 0 24 24"
-      width={18}
-      height={18}
+      width={size}
+      height={size}
       fill="none"
       stroke="currentColor"
       strokeWidth={2.4}
@@ -304,34 +253,27 @@ function PendingEquation({ latex }: { latex: string }) {
     () => katex.renderToString(latex, { displayMode: true, throwOnError: false, strict: false }),
     [latex],
   );
-  const ref = useRef<HTMLDivElement>(null);
-  const { scale } = useFitScale(ref, html);
   return (
     <div className="pending-line" aria-live="polite">
-      <div
-        ref={ref}
-        className="latex"
-        style={scale < 1 ? { fontSize: `${BASE_FONT_REM * scale}rem` } : undefined}
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
+      <div className="latex" dangerouslySetInnerHTML={{ __html: html }} />
     </div>
   );
 }
 
-// Combined width of the delete + verdict actions revealed by swiping left.
-// Unmarked row: Wrong + Correct + X. Marked row: single Unmark + X.
-const SWIPE_REVEAL_UNMARKED = 228;
-const SWIPE_REVEAL_MARKED = 152;
+// Tinder-style verdicts: swipe right = correct, swipe left = wrong.
+// Commit past this distance, or on a quick horizontal flick.
+const SWIPE_COMMIT = 72;
+const FLICK_VX = 0.6;
 
 function LineView({
   line,
   targeted,
   provisional,
   verdict,
+  reason,
   swipeEnabled,
   onMicDown,
   onMicUp,
-  onOverflow,
   onDelete,
   onSetVerdict,
   onCancelDictation,
@@ -340,10 +282,10 @@ function LineView({
   targeted: boolean;
   provisional: boolean;
   verdict: "wrong" | "correct" | undefined;
+  reason: string | undefined;
   swipeEnabled: boolean;
   onMicDown: () => void;
   onMicUp: () => void;
-  onOverflow?: () => void;
   onDelete: () => void;
   onSetVerdict: (verdict: "wrong" | "correct" | undefined) => void;
   onCancelDictation: () => void;
@@ -352,37 +294,26 @@ function LineView({
     () => katex.renderToString(line.latex, { displayMode: true, throwOnError: false, strict: false }),
     [line.latex],
   );
-  const ref = useRef<HTMLDivElement>(null);
-  const { scale, overflows } = useFitScale(ref, html);
-  const reportedRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!overflows || provisional || !onOverflow) return;
-    if (reportedRef.current === line.latex) return;
-    reportedRef.current = line.latex;
-    onOverflow();
-  }, [overflows, provisional, onOverflow, line.latex]);
   const low = line.confidence < LOW_CONFIDENCE;
-  const reveal = verdict ? SWIPE_REVEAL_MARKED : SWIPE_REVEAL_UNMARKED;
 
-  // Swipe-left-to-delete: the row body tracks the pointer horizontally,
-  // revealing an X action anchored at the right edge. Transform is written
-  // straight to the DOM during the drag; React only tracks open/closed.
+  // Tinder swipe: the row body tracks the pointer — right for correct, left
+  // for wrong. Stamps fade in with drag distance via direct DOM writes;
+  // React only sees the committed verdict.
   const bodyRef = useRef<HTMLDivElement>(null);
-  const offsetRef = useRef(0);
+  const stampRightRef = useRef<HTMLDivElement>(null);
+  const stampLeftRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef({
     id: -1,
     startX: 0,
     startY: 0,
     active: false,
-    base: 0,
     lastX: 0,
     lastT: 0,
     vx: 0,
     enabled: false,
     fromMic: false,
   });
-  const [revealed, setRevealed] = useState(false);
-  const [swiping, setSwiping] = useState(false);
+  const suppressClickRef = useRef(false);
 
   const setBody = useCallback((x: number, animated: boolean) => {
     const el = bodyRef.current;
@@ -391,35 +322,19 @@ function LineView({
     el.style.transform = `translateX(${x}px)`;
   }, []);
 
+  const setStamps = useCallback((dx: number) => {
+    const o = Math.max(0, Math.min(1, (Math.abs(dx) - 28) / 80));
+    const right = stampRightRef.current;
+    const left = stampLeftRef.current;
+    if (right) right.style.opacity = dx > 0 ? o.toFixed(2) : "0";
+    if (left) left.style.opacity = dx < 0 ? o.toFixed(2) : "0";
+  }, []);
+
   // The content can change underneath (undo/redo/voice edit) — reset the row
   useEffect(() => {
-    offsetRef.current = 0;
-    setRevealed(false);
     setBody(0, false);
-  }, [line.latex, setBody]);
-
-  // Marking/unmarking while the row is open swaps the action layout —
-  // re-snap so the reveal hugs the new button column exactly.
-  useEffect(() => {
-    if (!revealed) return;
-    offsetRef.current = -reveal;
-    setBody(-reveal, true);
-  }, [revealed, reveal, setBody]);
-
-  // A press anywhere outside an open row closes it
-  useEffect(() => {
-    if (!revealed) return;
-    const onDown = (e: PointerEvent) => {
-      const row = bodyRef.current?.parentElement;
-      if (row && !row.contains(e.target as Node)) {
-        offsetRef.current = 0;
-        setRevealed(false);
-        setBody(0, true);
-      }
-    };
-    window.addEventListener("pointerdown", onDown, true);
-    return () => window.removeEventListener("pointerdown", onDown, true);
-  }, [revealed, setBody]);
+    setStamps(0);
+  }, [line.latex, setBody, setStamps]);
 
   // Capture-phase handlers: they see presses that land on the row's buttons
   // (the line mic calls stopPropagation in its own bubble handler) so the
@@ -430,13 +345,13 @@ function LineView({
     d.startX = e.clientX;
     d.startY = e.clientY;
     d.active = false;
-    d.base = offsetRef.current;
     d.lastX = e.clientX;
     d.lastT = e.timeStamp;
     d.vx = 0;
     d.enabled = swipeEnabled;
+    suppressClickRef.current = false;
     const t = e.target as HTMLElement | null;
-    d.fromMic = !!t?.closest?.(".line-mic");
+    d.fromMic = !!t?.closest?.(".line-mic, .line-delete");
   };
 
   const onRowPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -447,23 +362,22 @@ function LineView({
     if (!d.active) {
       // Standard mobile pattern: a press stays a press until the finger
       // travels sideways past the slop; then the swipe steals the gesture —
-      // cancelling a mic hold in flight — and the button press is void.
-      // Vertical movement never claims: native scrolling keeps winning.
+      // cancelling a mic hold in flight. Vertical movement never claims:
+      // native scrolling keeps winning.
       const slop = d.fromMic ? 24 : 10;
       if (Math.abs(dx) < slop || Math.abs(dx) <= Math.abs(dy)) return;
       if (!d.enabled && !d.fromMic) return;
       d.active = true;
       if (d.fromMic) onCancelDictation();
       e.currentTarget.setPointerCapture(e.pointerId);
-      setSwiping(true);
     }
-    const next = Math.min(0, Math.max(-reveal, d.base + dx));
     const dt = e.timeStamp - d.lastT;
     if (dt > 0) d.vx = (e.clientX - d.lastX) / dt;
     d.lastX = e.clientX;
     d.lastT = e.timeStamp;
-    offsetRef.current = next;
+    const next = Math.max(-96, Math.min(96, dx));
     setBody(next, false);
+    setStamps(next);
   };
 
   const onRowPointerEnd = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -472,88 +386,71 @@ function LineView({
     d.id = -1;
     if (!d.active) return;
     d.active = false;
-    setSwiping(false);
-    // Snap open past a third of the reveal, or on a quick leftward flick
-    const open = offsetRef.current < -reveal / 3 || d.vx < -0.5;
-    offsetRef.current = open ? -reveal : 0;
-    setBody(offsetRef.current, true);
-    setRevealed(open);
+    suppressClickRef.current = true;
+    const dx = e.clientX - d.startX;
+    // A drag from the mic/✕ only cancels an in-flight hold; it never marks.
+    const commit = !d.fromMic && (Math.abs(dx) >= SWIPE_COMMIT || Math.abs(d.vx) >= FLICK_VX);
+    setBody(0, true);
+    setStamps(0);
+    if (commit) onSetVerdict(dx >= 0 ? "correct" : "wrong");
+  };
+
+  // Tap a marked row to clear its verdict (taps on the mic/✕ buttons excluded)
+  const onRowClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+    if (!verdict) return;
+    const t = e.target as HTMLElement | null;
+    if (t?.closest?.(".line-mic, .line-delete")) return;
+    onSetVerdict(undefined);
   };
 
   return (
     <div
-      className={`line ${low ? "low" : ""} ${verdict ? `verdict-${verdict}` : ""} ${targeted ? "targeted" : ""} ${provisional ? "provisional" : ""} ${revealed ? "revealed" : ""} ${swiping ? "swiping" : ""}`}
+      className={`line ${low ? "low" : ""} ${verdict ? `verdict-${verdict}` : ""} ${targeted ? "targeted" : ""} ${provisional ? "provisional" : ""}`}
       title={low ? line.note : undefined}
+      onClick={onRowClick}
       onPointerDownCapture={onRowPointerDown}
       onPointerMoveCapture={onRowPointerMove}
       onPointerUpCapture={onRowPointerEnd}
       onPointerCancelCapture={onRowPointerEnd}
     >
-      {verdict ? (
-        <button
-          className="line-verdict-unmark"
-          onClick={() => onSetVerdict(undefined)}
-          aria-hidden={!revealed}
-          tabIndex={revealed ? 0 : -1}
-          title={verdict === "wrong" ? "Unmark wrong" : "Unmark correct"}
-        >
-          Unmark
-        </button>
-      ) : (
-        <>
-          <button
-            className="line-wrong"
-            onClick={() => onSetVerdict("wrong")}
-            aria-hidden={!revealed}
-            tabIndex={revealed ? 0 : -1}
-            title="Mark as wrong"
-          >
-            Wrong
-          </button>
-          <button
-            className="line-correct"
-            onClick={() => onSetVerdict("correct")}
-            aria-hidden={!revealed}
-            tabIndex={revealed ? 0 : -1}
-            title="Mark as correct"
-          >
-            Correct
-          </button>
-        </>
-      )}
+      <div ref={bodyRef} className="line-body">
+        <div className="latex" dangerouslySetInnerHTML={{ __html: html }} />
+        {verdict === "wrong" && reason ? <div className="line-reason">“{reason}”</div> : null}
+      </div>
+      <button
+        className="line-mic"
+        title="Hold to edit this line by voice"
+        onPointerDown={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          e.currentTarget.setPointerCapture(e.pointerId);
+          onMicDown();
+        }}
+        onPointerUp={(e) => {
+          e.stopPropagation();
+          onMicUp();
+        }}
+        onContextMenu={(e) => e.preventDefault()}
+      >
+        <MicGlyph />
+      </button>
       <button
         className="line-delete"
         onClick={() => onDelete()}
-        aria-hidden={!revealed}
-        tabIndex={revealed ? 0 : -1}
         title="Delete line (Ctrl+Z to undo)"
+        aria-label="Delete line"
       >
-        X
+        <XGlyph size={13} />
       </button>
-      <div ref={bodyRef} className="line-body">
-        <div
-          ref={ref}
-          className="latex"
-          style={scale < 1 ? { fontSize: `${BASE_FONT_REM * scale}rem` } : undefined}
-          dangerouslySetInnerHTML={{ __html: html }}
-        />
-        <button
-          className="line-mic"
-          title="Hold to edit this line by voice"
-          onPointerDown={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            e.currentTarget.setPointerCapture(e.pointerId);
-            onMicDown();
-          }}
-          onPointerUp={(e) => {
-            e.stopPropagation();
-            onMicUp();
-          }}
-          onContextMenu={(e) => e.preventDefault()}
-        >
-          <MicGlyph />
-        </button>
+      <div ref={stampRightRef} className="stamp stamp-right" aria-hidden>
+        Correct
+      </div>
+      <div ref={stampLeftRef} className="stamp stamp-left" aria-hidden>
+        Wrong
       </div>
     </div>
   );
@@ -564,9 +461,15 @@ export default function App() {
   const [error, setError] = useState("");
   const [lines, setLines] = useState<Line[]>([]);
   // Verdicts live outside the undo history on purpose: Ctrl+Z never
-  // reverts a mark, the swipe button's Unmark is the only way to clear one.
-  // "wrong" | "correct" | undefined per line id.
+  // reverts a mark — tapping a marked row clears it. "wrong" | "correct"
+  // per line id.
   const [verdicts, setVerdicts] = useState<Record<string, "wrong" | "correct" | undefined>>({});
+  // The spoken "what's wrong" reason captured after a wrong-swipe, per line id.
+  const [reasons, setReasons] = useState<Record<string, string>>({});
+  // Line awaiting its spoken reason (the swipe-left prompt); tracked by id so
+  // deletes/undos can't silently retarget the prompt at a different line.
+  const [reasonTargetId, setReasonTargetId] = useState<string | null>(null);
+  const reasonTargetIdRef = useRef<string | null>(null);
   const [past, setPast] = useState<Line[][]>([]);
   const [future, setFuture] = useState<Line[][]>([]);
   const [targetIndex, setTargetIndex] = useState<number | undefined>(undefined);
@@ -586,11 +489,13 @@ export default function App() {
   useEffect(() => {
     targetRef.current = targetIndex;
   }, [targetIndex]);
+  useEffect(() => {
+    reasonTargetIdRef.current = reasonTargetId;
+  }, [reasonTargetId]);
   const ctxRef = useRef<CallContext>({ lines: [] });
   ctxRef.current = { lines: lines.map((l) => ({ latex: l.latex })), targetIndex, source };
   const linesRef = useRef<Line[]>([]);
   linesRef.current = lines;
-  const splitAttemptedRef = useRef<Set<string>>(new Set());
   const recorderRef = useRef<PushToTalk | null>(null);
   const levelRef = useRef(0);
   const cancelReqRef = useRef(false);
@@ -673,8 +578,9 @@ export default function App() {
           liveTimer.current = window.setTimeout(() => void poll(), 1200);
         }
       };
-      if (liveTranscriptionEnabled()) {
-        // First poll scheduled (not run inline): statusRef hasn't settled yet
+      if (liveTranscriptionEnabled() && reasonTargetIdRef.current === null) {
+        // First poll scheduled (not run inline): statusRef hasn't settled yet.
+        // Reason captures skip live polls — plain speech needs no math preview.
         liveTimer.current = window.setTimeout(() => void poll(), 1200);
       }
     } catch (e) {
@@ -693,10 +599,49 @@ export default function App() {
     if (statusRef.current !== "listening" || !recorderRef.current) return;
     stopLivePolls();
     setPollWarning(false);
+    const reasonId = reasonTargetIdRef.current;
     const target = targetRef.current;
     setStatus("thinking");
     try {
       const { blob, durationMs, peak } = await recorderRef.current.stop();
+      if (reasonId !== null) {
+        // Spoken "what's wrong" for a wrong-marked line: transcribe verbatim,
+        // attach it to the wrong record, show it under the line. The verdict
+        // itself already landed with the swipe.
+        const { wav } = await blobToWav(blob);
+        if (durationMs < 500 || peak < 0.05) {
+          console.info(`[reason] discard-blank dur=${durationMs}ms peak=${peak.toFixed(3)}`);
+          setStatus("idle");
+          return;
+        }
+        try {
+          const text = (await transcribeReason(wav)).trim();
+          const line = linesRef.current.find((l) => l.id === reasonId);
+          if (line && text) {
+            setReasons((prev) => ({ ...prev, [line.id]: text }));
+            void setWrongReason(
+              line.id,
+              line.takeId,
+              {
+                latex: line.latex,
+                transcript: line.transcript,
+                note: line.note,
+                confidence: line.confidence,
+              },
+              text,
+            );
+            setReasonTargetId(null);
+          } else {
+            setError("Couldn't hear that — hold the mic and say what's wrong.");
+          }
+        } catch (e) {
+          setError(
+            `Couldn't transcribe the reason — try again. ${(e as Error).message || ""}`.trim(),
+          );
+        }
+        setStatus("idle");
+        return;
+      }
       // Blank recording (tap, click, silence, ambient noise): discard before calling the API
       const isTargetedEdit = target !== undefined;
       const minDuration = isTargetedEdit ? 800 : 400;
@@ -863,48 +808,6 @@ export default function App() {
     setContextOpen(true);
   }, [source]);
 
-  // A solid line still overflows at the minimum font scale: ask the model to
-  // split it into several shorter lines (split at relation signs) and swap it
-  // in-place, keeping the transcript/confidence of the original.
-  const handleOverflow = useCallback((latex: string) => {
-    if (splitAttemptedRef.current.has(latex)) return;
-    splitAttemptedRef.current.add(latex);
-    void (async () => {
-      try {
-        const parts = await splitLine(latex);
-        // Never re-attempt the original or any split result
-        splitAttemptedRef.current.add(latex);
-        for (const p of parts) splitAttemptedRef.current.add(p);
-        if (parts.length < 2) return;
-        // Safety: refuse the split if it lost or altered any math
-        const stripped = (s: string) => s.replace(/\s+/g, "");
-        if (stripped(parts.join("")) !== stripped(latex)) return;
-        const before = linesRef.current;
-        const idx = before.findIndex((l) => l.latex === latex);
-        if (idx < 0) return;
-        const orig = before[idx];
-        const next = [...before];
-        next.splice(
-          idx,
-          1,
-          ...parts.map((l) => ({
-            id: uid(),
-            takeId: orig.takeId,
-            latex: l,
-            transcript: orig.transcript,
-            confidence: orig.confidence,
-            note: orig.note,
-          })),
-        );
-        setPast((p) => [...p.slice(-49), before]);
-        setFuture([]);
-        setLines(next);
-      } catch {
-        // split failed: the line stays at min scale, horizontally scrollable
-      }
-    })();
-  }, []);
-
   const undo = useCallback(() => {
     setProvisionalFrom(null);
     setPast((p) => {
@@ -931,6 +834,7 @@ export default function App() {
   const deleteLine = useCallback((idx: number) => {
     const before = linesRef.current;
     if (idx < 0 || idx >= before.length) return;
+    if (before[idx].id === reasonTargetIdRef.current) setReasonTargetId(null);
     setProvisionalFrom(null);
     setPast((p) => [...p.slice(-49), before]);
     setFuture([]);
@@ -939,8 +843,8 @@ export default function App() {
   }, []);
 
   // Set a line's verdict ("wrong" or "correct"), or clear it with undefined.
-  // Ctrl+Z never touches verdicts — the swipe button's Unmark is the only
-  // way to clear one, after which either mark is available again.
+  // Ctrl+Z never touches verdicts — tapping a marked row clears it, after
+  // which either swipe is available again.
   const setVerdict = useCallback(
     (idx: number, verdict: "wrong" | "correct" | undefined) => {
       const line = linesRef.current[idx];
@@ -951,13 +855,26 @@ export default function App() {
         note: line.note,
         confidence: line.confidence,
       };
-      setVerdicts((prev) => ({ ...prev, [line.id]: verdict }));
+      setVerdicts((prev) => {
+        const next = { ...prev };
+        if (verdict === undefined) delete next[line.id];
+        else next[line.id] = verdict;
+        return next;
+      });
       if (verdict === undefined) {
         void unmarkWrong(line.id);
         void unmarkCorrect(line.id);
+        setReasons((prev) => {
+          if (!(line.id in prev)) return prev;
+          const next = { ...prev };
+          delete next[line.id];
+          return next;
+        });
       } else if (verdict === "wrong") {
+        void unmarkCorrect(line.id);
         void markWrong(line.id, line.takeId, meta);
       } else {
+        void unmarkWrong(line.id);
         void markCorrect(line.id, line.takeId, meta);
       }
     },
@@ -1004,6 +921,7 @@ export default function App() {
 
   const listening = status === "listening";
   const thinking = status === "thinking";
+  const reasonLine = reasonTargetId ? lines.find((l) => l.id === reasonTargetId) : undefined;
   const { mode: installMode, install, dismiss: dismissInstall } = useInstall();
 
   return (
@@ -1038,16 +956,23 @@ export default function App() {
                 targeted={targetIndex === i}
                 provisional={provisionalFrom !== null && i >= provisionalFrom}
                 verdict={verdicts[line.id]}
+                reason={reasons[line.id]}
                 swipeEnabled={!listening && !thinking}
                 onMicDown={() => {
                   setTargetIndex(i);
                   void start();
                 }}
                 onMicUp={() => void finish()}
-                onOverflow={() => handleOverflow(line.latex)}
                 onDelete={() => deleteLine(i)}
-                onSetVerdict={(v) => setVerdict(i, v)}
-
+                onSetVerdict={(v) => {
+                  setVerdict(i, v);
+                  if (v === "wrong") {
+                    // Wrong-swipe prompts for a spoken "what's wrong" reason
+                    setReasonTargetId(line.id);
+                  } else if (reasonTargetIdRef.current === line.id) {
+                    setReasonTargetId(null);
+                  }
+                }}
                 onCancelDictation={cancel}
               />
             ))}
@@ -1058,6 +983,37 @@ export default function App() {
           <PendingEquation latex={liveResult.lines[0]} />
         )}
       </main>
+
+      {reasonLine && (
+        <div className="reason-sheet" role="status">
+          <div className="reason-what">
+            <span className="reason-label">Marked wrong</span>
+            <div
+              className="reason-latex"
+              dangerouslySetInnerHTML={{
+                __html: katex.renderToString(reasonLine.latex, {
+                  displayMode: false,
+                  throwOnError: false,
+                  strict: false,
+                }),
+              }}
+            />
+          </div>
+          <p className="reason-ask">
+            What's wrong with it? <b>Hold the mic</b> and say it — your words get saved with the
+            mark.
+          </p>
+          <button
+            className="reason-skip"
+            onClick={() => {
+              if (statusRef.current === "listening") cancel();
+              setReasonTargetId(null);
+            }}
+          >
+            Skip
+          </button>
+        </div>
+      )}
 
       <footer className="footer">
         {pollWarning && listening && (

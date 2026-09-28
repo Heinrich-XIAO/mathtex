@@ -47,6 +47,7 @@ export const markWrong = mutation({
     note: v.string(),
     confidence: v.number(),
     markedAt: v.number(),
+    reason: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db
@@ -54,6 +55,32 @@ export const markWrong = mutation({
       .withIndex("by_lineId", (q) => q.eq("lineId", args.lineId))
       .unique();
     if (existing) return;
+    await ctx.db.insert("wrongLines", args);
+  },
+});
+
+/** Attach or update the spoken "what's wrong" reason on a wrong mark.
+ *  Upserts: if the mark hasn't landed yet (race), insert it complete. */
+export const setWrongReason = mutation({
+  args: {
+    lineId: v.string(),
+    takeId: v.string(),
+    latex: v.string(),
+    transcript: v.string(),
+    note: v.string(),
+    confidence: v.number(),
+    markedAt: v.number(),
+    reason: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("wrongLines")
+      .withIndex("by_lineId", (q) => q.eq("lineId", args.lineId))
+      .unique();
+    if (existing) {
+      await ctx.db.patch(existing._id, { reason: args.reason });
+      return;
+    }
     await ctx.db.insert("wrongLines", args);
   },
 });

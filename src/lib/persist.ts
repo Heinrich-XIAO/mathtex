@@ -53,6 +53,7 @@ export async function markWrong(
   lineId: string,
   takeId: string,
   meta: TakeMeta,
+  reason?: string,
 ): Promise<void> {
   const c = getClient();
   if (!c) return;
@@ -61,10 +62,34 @@ export async function markWrong(
       lineId,
       takeId,
       ...meta,
+      ...(reason ? { reason } : {}),
       markedAt: Date.now(),
     });
   } catch (e) {
     console.warn("[convex] markWrong failed", e);
+  }
+}
+
+/** Attach (or update) the spoken "what's wrong" reason on a wrong mark.
+ *  Upserts, so a late reason lands even if the mark raced ahead. Fire-and-forget. */
+export async function setWrongReason(
+  lineId: string,
+  takeId: string,
+  meta: TakeMeta,
+  reason: string,
+): Promise<void> {
+  const c = getClient();
+  if (!c) return;
+  try {
+    await c.mutation(api.takes.setWrongReason, {
+      lineId,
+      takeId,
+      ...meta,
+      reason,
+      markedAt: Date.now(),
+    });
+  } catch (e) {
+    console.warn("[convex] setWrongReason failed", e);
   }
 }
 

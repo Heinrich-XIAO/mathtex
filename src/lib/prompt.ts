@@ -59,13 +59,11 @@ PHRASE GLOSSARY (spoken -> LaTeX):
 
 Prefer \\\\frac for fractions, \\\\left(...\\\\right) for parenthesized groups, and \\\\, dx for differentials.`;
 
-export const SPLIT_PROMPT = `You reformat an over-wide LaTeX display line for a narrow math notepad by splitting it into several shorter lines.
+export const REASON_PROMPT = `You transcribe a student explaining, in one short breath, what is wrong with a math line they just marked incorrect.
 
-Return ONLY a JSON object: {"lines": ["...", ...]}.
+Return ONLY a JSON object: {"reason": "..."}.
 
 RULES:
-1. Split ONLY at relation signs (=, \\\\ne, <, >, \\\\le, \\\\ge, \\\\approx, \\\\sim, \\\\to), preferring points that balance the widths of the resulting lines.
-2. The relation sign stays at the END of the line it belongs to: "f(x) =" then "x^2 + 1". Never start a line with a bare relation sign.
-3. NEVER change the math. No simplifying, reordering, merging, or reformatting. The lines read in order must reproduce the original expression exactly.
-4. If the line has fewer than two relation signs (or cannot be split sensibly), return the original line unchanged as a single-element array.
-5. Output plain LaTeX strings, no markdown fences, no numbering.`;
+1. The reason is the student's own words, lightly cleaned: drop fillers ("um", "uh", "like"), keep the substance verbatim.
+2. Plain everyday phrasing stays as spoken ("the minus sign is missing", "that should be x cubed not x squared"). Do NOT convert to LaTeX and do NOT add math they didn't say.
+3. No commentary, no quotes around the text, nothing besides the JSON object.`;

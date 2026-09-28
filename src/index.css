@@ -103,133 +103,91 @@ body {
   touch-action: pan-y;
 }
 
-/* Sliding row content: latex + line mic travel together over the delete action */
+/* Sliding row content: latex + spoken reason travel with the Tinder swipe */
 .line-body {
   position: relative;
   z-index: 1;
-  padding: 2px 40px 2px 8px;
+  padding: 2px 64px 2px 8px;
   user-select: none;
   -webkit-user-select: none;
 }
 
-/* Verdict actions, revealed left of delete by swiping the row left */
-.line-wrong,
-.line-correct,
-.line-verdict-unmark {
+/* Tinder-style verdict feedback while a swipe is in flight; the committed
+   state is the colored left edge on the row itself */
+.stamp {
   position: absolute;
-  bottom: 0;
-  width: 76px;
-  border: none;
-  border-radius: 10px;
-  font-family: inherit;
+  top: 50%;
+  z-index: 3;
+  padding: 2px 12px;
+  border-radius: 8px;
   font-size: 0.95rem;
-  font-weight: 700;
-  cursor: pointer;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 150ms, background 120ms;
 }
 
-/* Unmarked row: Wrong, Correct, then Delete at the right edge */
-.line-wrong {
-  top: 0;
-  right: 152px;
-  background: color-mix(in srgb, var(--amber) 20%, var(--card));
-  color: var(--amber);
-}
-
-.line-correct {
-  top: 0;
-  right: 76px;
-  background: color-mix(in srgb, #6fbf73 20%, var(--card));
+.stamp-right {
+  left: 14px;
+  transform: translateY(-50%) rotate(-7deg);
+  border: 2.5px solid #6fbf73;
   color: #6fbf73;
 }
 
-/* Verdict rows: single Unmark button where Correct used to sit */
-.line-verdict-unmark {
-  top: 0;
-  right: 76px;
-  width: 76px;
-  background: color-mix(in srgb, var(--muted) 20%, var(--card));
-  color: var(--muted);
-}
-
-.line.verdict-wrong .line-verdict-unmark {
-  background: color-mix(in srgb, var(--red) 20%, var(--card));
+.stamp-left {
+  right: 14px;
+  transform: translateY(-50%) rotate(7deg);
+  border: 2.5px solid var(--red);
   color: var(--red);
-}
-
-.line.verdict-correct .line-verdict-unmark {
-  background: color-mix(in srgb, #6fbf73 20%, var(--card));
-  color: #6fbf73;
 }
 
 /* Subtle at-a-glance markers for marked lines */
 .line.verdict-wrong {
   box-shadow: inset 3px 0 0 var(--red);
+  background: color-mix(in srgb, var(--red) 5%, transparent);
 }
+
 .line.verdict-correct {
   box-shadow: inset 3px 0 0 #6fbf73;
+  background: color-mix(in srgb, #6fbf73 5%, transparent);
 }
 
-/* Delete action revealed by swiping the row left; hidden until it peeks out */
+/* The spoken "what's wrong" reason, captured after a wrong-swipe */
+.line-reason {
+  padding: 0 8px 5px;
+  font-size: 0.78rem;
+  font-style: italic;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Delete action: a quiet ✕ at the right edge of every row */
 .line-delete {
   position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 76px;
+  top: 50%;
+  right: 4px;
+  z-index: 2;
+  transform: translateY(-50%);
   border: none;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--red) 20%, var(--card));
-  color: var(--red);
-  font-family: inherit;
-  font-size: 0.95rem;
-  font-weight: 700;
+  background: transparent;
+  color: var(--muted);
+  opacity: 0.3;
+  border-radius: 6px;
+  padding: 5px;
   cursor: pointer;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 150ms, background 120ms;
-}
-
-.line.revealed .line-delete,
-.line.revealed .line-wrong,
-.line.revealed .line-correct,
-.line.revealed .line-verdict-unmark,
-.line.swiping .line-delete,
-.line.swiping .line-wrong,
-.line.swiping .line-correct,
-.line.swiping .line-verdict-unmark {
-  opacity: 1;
-  pointer-events: auto;
+  display: grid;
+  place-items: center;
+  touch-action: manipulation;
+  user-select: none;
+  transition: opacity 120ms, color 120ms;
 }
 
 .line-delete:hover {
-  background: color-mix(in srgb, var(--red) 32%, var(--card));
-}
-
-.line-delete:active {
-  background: color-mix(in srgb, var(--red) 44%, var(--card));
-}
-
-.line-wrong:hover {
-  background: color-mix(in srgb, var(--amber) 32%, var(--card));
-}
-
-.line-wrong:active {
-  background: color-mix(in srgb, var(--amber) 44%, var(--card));
-}
-
-.line-correct:hover {
-  background: color-mix(in srgb, #6fbf73 32%, var(--card));
-}
-
-.line-correct:active {
-  background: color-mix(in srgb, #6fbf73 44%, var(--card));
-}
-
-.line-verdict-unmark:hover {
-  filter: brightness(1.15);
+  color: var(--red);
+  opacity: 1;
 }
 
 .line .latex {
@@ -248,8 +206,18 @@ body {
 }
 
 /* KaTeX display mode defaults to margin: 1em 0 — crush it */
-.line .katex-display {
+.line .katex-display,
+.pending-line .katex-display {
   margin: 0;
+}
+
+/* KaTeX 0.18 pre-chunks equations into unbreakable units at TeX-correct
+ * break points (after relations and binary operators, operator glued to the
+ * line it ends). Let those units wrap onto several lines instead of
+ * overflowing: .katex-display > .katex is white-space: nowrap by default. */
+.line .katex-display > .katex,
+.pending-line .katex-display > .katex {
+  white-space: normal;
 }
 
 .line.low .latex {
@@ -266,8 +234,9 @@ body {
 .line-mic {
   position: absolute;
   top: 50%;
-  right: 8px;
+  right: 30px;
   transform: translateY(-50%);
+  z-index: 2;
   background: transparent;
   border: none;
   color: var(--muted);
@@ -335,6 +304,80 @@ body {
   border: 1px solid color-mix(in srgb, var(--amber) 35%, transparent);
   border-radius: 8px;
   padding: 4px 10px;
+}
+
+/* "What's wrong?" prompt after a wrong-swipe: a card floating above the pill */
+.reason-sheet {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 96px;
+  z-index: 10;
+  width: min(480px, calc(100vw - 32px));
+  background: color-mix(in srgb, var(--red) 7%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
+  border-radius: 12px;
+  padding: 12px 14px;
+  box-shadow: 0 18px 44px rgb(0 0 0 / 40%);
+  animation: reasonIn 180ms ease-out;
+}
+
+@keyframes reasonIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+  to { opacity: 1; transform: translateX(-50%); }
+}
+
+.reason-what {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.reason-label {
+  flex: none;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--red);
+}
+
+.reason-latex {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1rem;
+}
+
+.reason-ask {
+  margin: 8px 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.reason-ask b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.reason-skip {
+  margin-top: 10px;
+  background: transparent;
+  border: 1px solid var(--card-edge);
+  border-radius: 999px;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 0.8rem;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+.reason-skip:hover {
+  color: var(--text);
+  border-color: var(--muted);
 }
 
 /* Bottom-left ghost undo/redo */

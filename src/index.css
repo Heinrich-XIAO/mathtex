@@ -45,10 +45,16 @@ body {
   flex: 1;
   display: flex;
   flex-direction: column;
-  justify-content: center;
   gap: 8px;
   padding: 24px 0;
   overflow-y: auto;
+  /* Centered via auto margins on children below: justify-content: center is
+     overflow-unsafe — the list's top half becomes unscrollably clipped. */
+}
+
+.stage > * {
+  margin-top: auto;
+  margin-bottom: auto;
 }
 
 /* While listening, existing equations step back so the incoming line leads */
@@ -153,7 +159,7 @@ body {
   background: color-mix(in srgb, #6fbf73 5%, transparent);
 }
 
-/* The spoken "what's wrong" reason, captured after a wrong-swipe */
+/* The typed correction ("what it should be"), captured after a wrong-swipe */
 .line-reason {
   padding: 0 8px 5px;
   font-size: 0.78rem;
@@ -306,7 +312,7 @@ body {
   padding: 4px 10px;
 }
 
-/* "What's wrong?" prompt after a wrong-swipe: a card floating above the pill */
+/* Typed-correction dialog after a wrong-swipe: a card floating above the pill */
 .reason-sheet {
   position: fixed;
   left: 50%;
@@ -351,27 +357,59 @@ body {
   font-size: 1rem;
 }
 
-.reason-ask {
-  margin: 8px 0 0;
-  font-size: 0.85rem;
-  color: var(--muted);
-  line-height: 1.45;
+.reason-form {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
 }
 
-.reason-ask b {
+.reason-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
+  border-radius: 10px;
   color: var(--text);
+  font-family: inherit;
+  font-size: 0.9rem;
+  padding: 8px 11px;
+}
+
+.reason-input::placeholder {
+  color: var(--muted);
+}
+
+.reason-input:focus {
+  outline: none;
+  border-color: var(--red);
+}
+
+.reason-save {
+  flex: none;
+  background: var(--red);
+  border: none;
+  border-radius: 999px;
+  color: #fff;
+  font-family: inherit;
+  font-size: 0.8rem;
   font-weight: 600;
+  padding: 7px 15px;
+  cursor: pointer;
+}
+
+.reason-save:hover {
+  filter: brightness(1.12);
 }
 
 .reason-skip {
-  margin-top: 10px;
+  flex: none;
   background: transparent;
   border: 1px solid var(--card-edge);
   border-radius: 999px;
   color: var(--muted);
   font-family: inherit;
   font-size: 0.8rem;
-  padding: 6px 14px;
+  padding: 7px 14px;
   cursor: pointer;
 }
 
@@ -617,13 +655,6 @@ body {
   font-weight: 600;
 }
 
-.context-dialog p {
-  margin: 0 0 12px;
-  color: var(--muted);
-  font-size: 0.85rem;
-  line-height: 1.45;
-}
-
 .context-input {
   width: 100%;
   min-height: 130px;
@@ -648,6 +679,11 @@ body {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 14px;
+}
+
+/* Clear sits alone on the far left of the actions row */
+.context-clear {
+  margin-right: auto;
 }
 
 .context-secondary {

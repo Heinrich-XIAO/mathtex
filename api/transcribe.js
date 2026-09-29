@@ -57,20 +57,22 @@ export default async function handler(request) {
     `Convert this transcription to LaTeX per the rules. If the transcription is or ends with a cancel/scratch/redo instruction, respond per the modes.`,
   ].filter(Boolean).join("\n");
 
+  const chatBody = {
+    model: CONVERTER,
+    temperature: 0,
+    max_tokens: 400,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: body.systemPrompt },
+      { role: "user", content: userText },
+    ],
+  };
+
   try {
     const res = await fetch(`${TARGET}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${KEY}` },
-      body: JSON.stringify({
-        model: CONVERTER,
-        temperature: 0,
-        max_tokens: 400,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: body.systemPrompt },
-          { role: "user", content: userText },
-        ],
-      }),
+      body: JSON.stringify(chatBody),
     });
     if (!res.ok) {
       const errText = await res.text();
@@ -81,7 +83,7 @@ export default async function handler(request) {
     console.log(
       JSON.stringify({ route: "transcribe", model, transcript: trunc(transcript), raw: trunc(content), ms: Date.now() - t0 }),
     );
-    return Response.json({ transcript, raw: content });
+    return Response.json({ transcript, raw: content, request: JSON.stringify(chatBody) });
   } catch (e) {
     return Response.json({ transcript, error: { message: String(e).slice(0, 200) } }, { status: 502 });
   }

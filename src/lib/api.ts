@@ -1,4 +1,4 @@
-import { SYSTEM_PROMPT, REASON_PROMPT } from "./prompt";
+import { SYSTEM_PROMPT } from "./prompt";
 import { pcmToWav } from "./wav";
 
 export type Mode = "append" | "append_lines" | "replace_line" | "delete_last" | "noop";
@@ -8,6 +8,7 @@ export interface DictationResult {
   transcript: string;
   lines: string[];
   confidence: number;
+  uncertain: boolean;
   note: string;
 }
 
@@ -44,7 +45,7 @@ function contextText(ctx: CallContext): string {
     .map((l, i) => `${i + 1}. ${l.latex || "(empty)"}`)
     .join("\n");
   if (ctx.targetIndex !== undefined && ctx.targetIndex >= 0 && ctx.targetIndex < ctx.lines.length) {
-    return `${backgroundText}Current file lines (most recent last):\n${numbered}\n\nTARGET LINE: line ${ctx.targetIndex + 1} (${ctx.lines[ctx.targetIndex].latex}). The audio is an edit instruction for THIS line only. Listen to the audio and produce the JSON object.`;
+    return `${backgroundText}Current file lines (most recent last):\n${numbered}\n\nLine ${ctx.targetIndex + 1} (${ctx.lines[ctx.targetIndex].latex}) is SELECTED for editing. If the audio explicitly edits this line ("change", "replace", "fix", "make it", "instead", ...), use "replace_line" on it. If the audio is new math, output "append" as a new line — do NOT reshape what was said to resemble the selected line, and never adopt its values as your own. Listen to the audio and produce the JSON object.`;
   }
   return `${backgroundText}Current file lines (most recent last):\n${numbered}\n\nThe audio is NEW dictation to append after line ${ctx.lines.length} as a new line. It should relate naturally to the preceding lines and the background context. Use "replace_line" only if the audio is an explicit edit command for an existing line. Listen to the audio and produce the JSON object.`;
 }
@@ -59,39 +60,36 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
   return btoa(bin);
 }
 
+/** Exact request body sent to the LLM, serialized for persistence. Base64
+ *  audio payloads are replaced by a placeholder: the clip already lives in
+ *  _storage on the same row, and Convex caps documents at 1MB, so verbatim
+ *  base64 would fail large writes. */
+function requestForDb(body: unknown): string {
+  try {
+    const clone = JSON.parse(JSON.stringify(body)) as {
+      messages?: { content?: unknown }[];
+    };
+    for (const m of clone.messages ?? []) {
+      if (Array.isArray(m.content)) {
+        for (const part of m.content) {
+          if (part && typeof part === "object" && "input_audio" in (part as object)) {
+            (part as { input_audio: { data: string } }).input_audio.data =
+              "<audio in _storage>";
+          }
+        }
+      }
+    }
+    return JSON.stringify(clone);
+  } catch {
+    return "";
+  }
+}
+
 function stripFences(s: string): string {
   const m = s.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
   return m ? m[1] : s;
 }
 
-/** JSON.parse with a fallback for models that emit LaTeX backslashes unescaped (\frac, \int). */
-function parseJsonLenient(content: string): unknown {
-  try {
-    return JSON.parse(content);
-  } catch {
-    return JSON.parse(sanitizeJsonBackslashes(content));
-  }
-}
-
-// Walk the string respecting valid \\ pairs: double any lone backslash that
-// isn't already a valid JSON escape.
-function sanitizeJsonBackslashes(s: string): string {
-  let out = "";
-  for (let i = 0; i < s.length; i++) {
-    if (s[i] !== "\\") {
-      out += s[i];
-      continue;
-    }
-    const next = s[i + 1] ?? "";
-    if (next === "\\" || /^["/bfnrtu]$/.test(next)) {
-      out += s.slice(i, i + 2);
-      i += 1;
-    } else {
-      out += "\\\\";
-    }
-  }
-  return out;
-}
 
 function parseResult(raw: string): DictationResult {  const obj = JSON.parse(stripFences(raw)) as Record<string, unknown>;
   const modes: Mode[] = ["append", "append_lines", "replace_line", "delete_last", "noop"];
@@ -107,6 +105,7 @@ function parseResult(raw: string): DictationResult {  const obj = JSON.parse(str
       ? obj.confidence
       : 0.8;
   const note = typeof obj.note === "string" ? obj.note : "";
+  const uncertain = obj.uncertain === true;
   const needsLatex = mode === "append" || mode === "append_lines" || mode === "replace_line";
   if (needsLatex && lines.length === 0) {
     throw new Error(`Missing "latex" in model response: ${JSON.stringify(obj).slice(0, 200)}`);
@@ -114,59 +113,24 @@ function parseResult(raw: string): DictationResult {  const obj = JSON.parse(str
   if (mode === "append_lines" && lines.length < 2) {
     throw new Error(`"append_lines" requires multiple lines: ${JSON.stringify(obj).slice(0, 200)}`);
   }
-  return { mode, transcript, lines, confidence, note };
+  return { mode, transcript, lines, confidence, uncertain, note };
 }
 
 export async function dictate(
   wav: ArrayBuffer,
   ctx: CallContext,
-  opts?: { signal?: AbortSignal; vadStats?: string },
-): Promise<DictationResult> {
+  opts?: { signal?: AbortSignal; vadStats?: string; asr?: string },
+): Promise<{ result: DictationResult; request: string }> {
   return dictateAudioLlm(wav, ctx, opts);
 }
 
 export const liveTranscriptionEnabled = (): boolean => LIVE_TRANSCRIBE_MODEL.length > 0;
 
-/** Transcribe the "what's wrong" reason clip verbatim — no math conversion. */
-export async function transcribeReason(wav: ArrayBuffer): Promise<string> {
-  mustConfig();
-  const res = await fetch(`${BASE}/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: MODEL,
-      temperature: 0,
-      max_tokens: 200,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: REASON_PROMPT },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: "The student just marked a math line wrong. Transcribe what they said is wrong with it." },
-            { type: "input_audio", input_audio: { data: arrayBufferToBase64(wav), format: "wav" } },
-          ],
-        },
-      ],
-    }),
-  });
-  if (!res.ok) throw new Error(`API ${res.status}`);
-  const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-  const content = data.choices?.[0]?.message?.content ?? "";
-  try {
-    const obj = parseJsonLenient(stripFences(content)) as { reason?: unknown };
-    if (typeof obj.reason === "string" && obj.reason.trim()) return obj.reason.trim();
-  } catch {
-    /* fall through to raw text */
-  }
-  return content.trim().slice(0, 400);
-}
-
 /** Live poll during hold: transcribe the clip, convert to LaTeX, return both. */
 export async function liveConvert(
   pcm: Float32Array,
   ctx: CallContext,
-): Promise<{ transcript: string; result: DictationResult | null }> {
+): Promise<{ transcript: string; result: DictationResult | null; request: string }> {
   const res = await fetch(`${BASE}/transcribe`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -178,7 +142,7 @@ export async function liveConvert(
     }),
   });
   if (!res.ok) throw new Error(`live convert ${res.status}`);
-  const data = (await res.json()) as { transcript?: string; raw?: string };
+  const data = (await res.json()) as { transcript?: string; raw?: string; request?: string };
   const transcript = (data.transcript ?? "").trim();
   let result: DictationResult | null = null;
   if (data.raw) {
@@ -188,30 +152,47 @@ export async function liveConvert(
       result = null;
     }
   }
-  return { transcript, result };
+  return { transcript, result, request: data.request ?? "" };
 }
 
 async function dictateAudioLlm(
   wav: ArrayBuffer,
   ctx: CallContext,
-  opts?: { signal?: AbortSignal; vadStats?: string },
-): Promise<DictationResult> {
+  opts?: { signal?: AbortSignal; vadStats?: string; asr?: string },
+): Promise<{ result: DictationResult; request: string }> {
   mustConfig();
   const signal = opts?.signal;
   const b64 = arrayBufferToBase64(wav);
+
+  // The live poll already ran a neutral ASR (fish-audio) on this clip while
+  // recording; pass its hearing to the audio LLM as a cross-check witness.
+  const asrText = (opts?.asr ?? "").trim();
+  const text = asrText
+    ? `${contextText(ctx)}\n\nASR CROSS-CHECK (an independent speech-to-text pass over the same audio; it may mishear — per the system prompt's DUAL EVIDENCE rules): ${asrText}`
+    : contextText(ctx);
 
   const messages: unknown[] = [
     { role: "system", content: SYSTEM_PROMPT },
     {
       role: "user",
       content: [
-        { type: "text", text: contextText(ctx) },
+        { type: "text", text },
         { type: "input_audio", input_audio: { data: b64, format: "wav" } },
       ],
     },
   ];
 
-  const callOnce = async (useJsonFormat: boolean): Promise<string> => {
+  const callOnce = async (
+    useJsonFormat: boolean,
+  ): Promise<{ content: string; body: Record<string, unknown> }> => {
+    const body: Record<string, unknown> = {
+      model: MODEL,
+      temperature: 0,
+      max_tokens: 400,
+      stream: true,
+      ...(useJsonFormat ? { response_format: { type: "json_object" } } : {}),
+      messages,
+    };
     const res = await fetch(`${BASE}/chat/completions`, {
       method: "POST",
       headers: {
@@ -220,14 +201,7 @@ async function dictateAudioLlm(
         // proxy before forwarding upstream.
         ...(opts?.vadStats ? { "x-vad-stats": opts.vadStats.slice(0, 300) } : {}),
       },
-      body: JSON.stringify({
-        model: MODEL,
-        temperature: 0,
-        max_tokens: 400,
-        stream: true,
-        ...(useJsonFormat ? { response_format: { type: "json_object" } } : {}),
-        messages,
-      }),
+      body: JSON.stringify(body),
       signal,
     });
     if (!res.ok) {
@@ -235,39 +209,41 @@ async function dictateAudioLlm(
       (err as Error & { status?: number }).status = res.status;
       throw err;
     }
-    return readContent(res);
+    return { content: await readContent(res), body };
   };
 
   let content: string;
+  let accepted: Record<string, unknown>;
   try {
-    content = await callOnce(true);
+    ({ content, body: accepted } = await callOnce(true));
   } catch (e) {
     if ((e as Error & { status?: number }).status === 400) {
-      content = await callOnce(false);
+      ({ content, body: accepted } = await callOnce(false));
     } else {
       throw e;
     }
   }
 
   try {
-    return parseResult(content);
+    return { result: parseResult(content), request: requestForDb(accepted) };
   } catch {
+    const retryBody = {
+      model: MODEL,
+      temperature: 0,
+      max_tokens: 400,
+      messages: [
+        ...messages,
+        { role: "assistant", content },
+        {
+          role: "user",
+          content: `That was not valid JSON (${(content || "").slice(0, 120)}). Reply with ONLY the corrected JSON object in the required shape.`,
+        },
+      ],
+    };
     const retryRes = await fetch(`${BASE}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: MODEL,
-        temperature: 0,
-        max_tokens: 400,
-        messages: [
-          ...messages,
-          { role: "assistant", content },
-          {
-            role: "user",
-            content: `That was not valid JSON (${(content || "").slice(0, 120)}). Reply with ONLY the corrected JSON object in the required shape.`,
-          },
-        ],
-      }),
+      body: JSON.stringify(retryBody),
       signal,
     });
     if (!retryRes.ok) {
@@ -278,7 +254,7 @@ async function dictateAudioLlm(
     };
     const retryContent = data.choices?.[0]?.message?.content;
     if (!retryContent) throw new Error("Model returned empty response on retry");
-    return parseResult(retryContent);
+    return { result: parseResult(retryContent), request: requestForDb(retryBody) };
   }
 }
 

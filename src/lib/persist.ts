@@ -17,13 +17,19 @@ export interface TakeMeta {
   transcript: string;
   note: string;
   confidence: number;
+  /** True when the model flagged part of the transcription as guessed/inferred. */
+  uncertain?: boolean;
+  /** Neutral ASR witness transcript (fish-audio) captured during the hold. */
+  asr?: string;
 }
 
-/** Push a dictated take's audio + metadata to Convex. Fire-and-forget. */
+/** Push a dictated take's audio + metadata to Convex. Fire-and-forget.
+ *  `request` is the exact LLM request body (JSON string, audio stripped). */
 export async function uploadTake(
   takeId: string,
   wav: Blob | ArrayBuffer,
   meta: TakeMeta,
+  request?: string,
 ): Promise<void> {
   const c = getClient();
   if (!c) return;
@@ -41,11 +47,23 @@ export async function uploadTake(
       takeId,
       storageId,
       ...meta,
+      ...(request ? { request } : {}),
       dictatedAt: Date.now(),
     });
   } catch (e) {
     console.warn("[convex] take upload failed", e);
   }
+}
+
+/** Verdict-shaped slice of TakeMeta: what the verdict tables store. */
+function verdictMeta(meta: TakeMeta) {
+  return {
+    latex: meta.latex,
+    transcript: meta.transcript,
+    note: meta.note,
+    confidence: meta.confidence,
+    ...(meta.uncertain !== undefined ? { uncertain: meta.uncertain } : {}),
+  };
 }
 
 /** Flag a line as wrong in the database. Fire-and-forget. */
@@ -61,7 +79,7 @@ export async function markWrong(
     await c.mutation(api.takes.markWrong, {
       lineId,
       takeId,
-      ...meta,
+      ...verdictMeta(meta),
       ...(reason ? { reason } : {}),
       markedAt: Date.now(),
     });
@@ -70,7 +88,7 @@ export async function markWrong(
   }
 }
 
-/** Attach (or update) the spoken "what's wrong" reason on a wrong mark.
+/** Attach (or update) the typed correction on a wrong mark.
  *  Upserts, so a late reason lands even if the mark raced ahead. Fire-and-forget. */
 export async function setWrongReason(
   lineId: string,
@@ -84,7 +102,7 @@ export async function setWrongReason(
     await c.mutation(api.takes.setWrongReason, {
       lineId,
       takeId,
-      ...meta,
+      ...verdictMeta(meta),
       reason,
       markedAt: Date.now(),
     });
@@ -116,7 +134,7 @@ export async function markCorrect(
     await c.mutation(api.takes.markCorrect, {
       lineId,
       takeId,
-      ...meta,
+      ...verdictMeta(meta),
       markedAt: Date.now(),
     });
   } catch (e) {

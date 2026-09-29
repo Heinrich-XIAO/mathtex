@@ -13,7 +13,6 @@ import {
   dictate,
   liveConvert,
   liveTranscriptionEnabled,
-  transcribeReason,
   ConfigError,
   type CallContext,
   type DictationResult,
@@ -36,6 +35,7 @@ interface Line {
   latex: string;
   transcript: string;
   confidence: number;
+  uncertain: boolean;
   note: string;
 }
 
@@ -44,6 +44,8 @@ const LOW_CONFIDENCE = 0.7;
 // stored so it survives reloads and sent to the LLM with every call.
 const CONTEXT_KEY = "mathtex.background-context";
 const CONTEXT_MAX = 4000;
+// Typed correction captured in the wrong-mark dialog: one sentence, capped.
+const REASON_MAX = 200;
 
 function loadStoredContext(): string {
   try {
@@ -63,6 +65,10 @@ function storeContext(v: string): void {
 /** Belt-and-braces for clips the VAD couldn't confirm: noise reaches the
  * model too, and a mutating result from it must be confident to land. */
 const LOW_VAD_MIN_CONFIDENCE = 0.5;
+// Destructive results (replace_line on a selected line, delete_last from noise)
+// need real confidence to execute; below this they downgrade to a safe no-op
+// or an extra append. Appends are exempt — a wrong extra line is a swipe away.
+const MUTATION_MIN_CONFIDENCE = 0.8;
 
 function uid(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -88,6 +94,7 @@ function applyResult(
         latex,
         transcript: r.transcript,
         confidence: r.confidence,
+        uncertain: r.uncertain,
         note: r.note,
       }));
       return [...lines, ...newLines];
@@ -105,6 +112,7 @@ function applyResult(
         latex: r.lines[0],
         transcript: r.transcript || lines[idx].transcript,
         confidence: r.confidence,
+        uncertain: r.uncertain,
         note: r.note || lines[idx].note,
       };
       return next;
@@ -294,7 +302,7 @@ function LineView({
     () => katex.renderToString(line.latex, { displayMode: true, throwOnError: false, strict: false }),
     [line.latex],
   );
-  const low = line.confidence < LOW_CONFIDENCE;
+  const low = line.confidence < LOW_CONFIDENCE || line.uncertain;
 
   // Tinder swipe: the row body tracks the pointer — right for correct, left
   // for wrong. Stamps fade in with drag distance via direct DOM writes;
@@ -464,12 +472,13 @@ export default function App() {
   // reverts a mark — tapping a marked row clears it. "wrong" | "correct"
   // per line id.
   const [verdicts, setVerdicts] = useState<Record<string, "wrong" | "correct" | undefined>>({});
-  // The spoken "what's wrong" reason captured after a wrong-swipe, per line id.
+  // The typed correction captured after a wrong-swipe, per line id.
   const [reasons, setReasons] = useState<Record<string, string>>({});
-  // Line awaiting its spoken reason (the swipe-left prompt); tracked by id so
-  // deletes/undos can't silently retarget the prompt at a different line.
+  // Line awaiting its typed correction (the swipe-left dialog); tracked by id
+  // so deletes/undos can't silently retarget the dialog at a different line.
   const [reasonTargetId, setReasonTargetId] = useState<string | null>(null);
   const reasonTargetIdRef = useRef<string | null>(null);
+  const [correctionDraft, setCorrectionDraft] = useState("");
   const [past, setPast] = useState<Line[][]>([]);
   const [future, setFuture] = useState<Line[][]>([]);
   const [targetIndex, setTargetIndex] = useState<number | undefined>(undefined);
@@ -480,7 +489,10 @@ export default function App() {
   const [source, setSource] = useState<string>(() => loadStoredContext());
   const [contextOpen, setContextOpen] = useState(false);
   const [contextDraft, setContextDraft] = useState<string>(() => loadStoredContext());
+  const contextInputRef = useRef<HTMLTextAreaElement | null>(null);
   const liveCoverageRef = useRef(0); // ms of audio covered by the last completed poll
+  const liveRequestRef = useRef<string>(""); // last poll's upstream LLM request
+  const asrRef = useRef(""); // last poll's neutral ASR transcript — witness for finalize
   const liveTimer = useRef<number | null>(null);
   const liveInFlight = useRef(false);
   const pollFailures = useRef(0);
@@ -514,12 +526,15 @@ export default function App() {
 
   const start = useCallback(async () => {
     if (statusRef.current !== "idle") return;
+    // The correction dialog owns the keyboard while open — no dictation.
+    if (reasonTargetIdRef.current) return;
     cancelReqRef.current = false;
     setError("");
     setLiveResult(null);
     pollFailures.current = 0;
     setPollWarning(false);
     liveCoverageRef.current = 0;
+    asrRef.current = "";
     // Warm the serverless function while the user is speaking (fire-and-forget)
     void fetch("/api/chat/completions", {
       method: "POST",
@@ -555,7 +570,9 @@ export default function App() {
           try {
             const { pcm, durationMs } = rec.snapshotPcm();
             if (durationMs > 700) {
-            const { result } = await liveConvert(pcm, ctxRef.current);
+            const { result, request, transcript } = await liveConvert(pcm, ctxRef.current);
+            liveRequestRef.current = request;
+            if (transcript.trim()) asrRef.current = transcript;
               if (statusRef.current === "listening") {
                 if (result && (result.mode === "append" || result.mode === "append_lines" || result.mode === "replace_line")) {
                   setLiveResult(result);
@@ -578,9 +595,8 @@ export default function App() {
           liveTimer.current = window.setTimeout(() => void poll(), 1200);
         }
       };
-      if (liveTranscriptionEnabled() && reasonTargetIdRef.current === null) {
+      if (liveTranscriptionEnabled()) {
         // First poll scheduled (not run inline): statusRef hasn't settled yet.
-        // Reason captures skip live polls — plain speech needs no math preview.
         liveTimer.current = window.setTimeout(() => void poll(), 1200);
       }
     } catch (e) {
@@ -599,49 +615,10 @@ export default function App() {
     if (statusRef.current !== "listening" || !recorderRef.current) return;
     stopLivePolls();
     setPollWarning(false);
-    const reasonId = reasonTargetIdRef.current;
     const target = targetRef.current;
     setStatus("thinking");
     try {
       const { blob, durationMs, peak } = await recorderRef.current.stop();
-      if (reasonId !== null) {
-        // Spoken "what's wrong" for a wrong-marked line: transcribe verbatim,
-        // attach it to the wrong record, show it under the line. The verdict
-        // itself already landed with the swipe.
-        const { wav } = await blobToWav(blob);
-        if (durationMs < 500 || peak < 0.05) {
-          console.info(`[reason] discard-blank dur=${durationMs}ms peak=${peak.toFixed(3)}`);
-          setStatus("idle");
-          return;
-        }
-        try {
-          const text = (await transcribeReason(wav)).trim();
-          const line = linesRef.current.find((l) => l.id === reasonId);
-          if (line && text) {
-            setReasons((prev) => ({ ...prev, [line.id]: text }));
-            void setWrongReason(
-              line.id,
-              line.takeId,
-              {
-                latex: line.latex,
-                transcript: line.transcript,
-                note: line.note,
-                confidence: line.confidence,
-              },
-              text,
-            );
-            setReasonTargetId(null);
-          } else {
-            setError("Couldn't hear that — hold the mic and say what's wrong.");
-          }
-        } catch (e) {
-          setError(
-            `Couldn't transcribe the reason — try again. ${(e as Error).message || ""}`.trim(),
-          );
-        }
-        setStatus("idle");
-        return;
-      }
       // Blank recording (tap, click, silence, ambient noise): discard before calling the API
       const isTargetedEdit = target !== undefined;
       const minDuration = isTargetedEdit ? 800 : 400;
@@ -697,14 +674,21 @@ export default function App() {
       //    replaces the provisional with the accurate result. One retry —
       //    transient 429/5xx/network blips are common; a short backoff first.
       let final: DictationResult | null = null;
+      let finalRequest = "";
       let finalErr: unknown = null;
       try {
-        final = await dictate(wavAndPcm.wav, ctx, { vadStats });
+        ({ result: final, request: finalRequest } = await dictate(wavAndPcm.wav, ctx, {
+          vadStats,
+          asr: asrRef.current,
+        }));
       } catch (e) {
         finalErr = e;
         await new Promise((r) => setTimeout(r, 700));
         try {
-          final = await dictate(wavAndPcm.wav, ctx, { vadStats });
+          ({ result: final, request: finalRequest } = await dictate(wavAndPcm.wav, ctx, {
+            vadStats,
+            asr: asrRef.current,
+          }));
           finalErr = null;
         } catch (e2) {
           finalErr = e2;
@@ -712,7 +696,17 @@ export default function App() {
       }
       const describe = (e: unknown) => (e instanceof Error ? e.message : String(e));
       if (final) {
-        // 3b) Confidence guard for low-VAD clips: hallucinated edits from
+        // 3b) Recovery bias for destructive modes: the corpus's only destructive
+        //    failure (a 0.58-confidence replace clobbering a good line) is
+        //    cheaper to prevent than to undo — an append of a stray line is a
+        //    swipe away from deletion, an overwrite is not. Downgrade mutating
+        //    results that arrive under-confident instead of executing them.
+        if (final.mode === "replace_line" && final.confidence < MUTATION_MIN_CONFIDENCE) {
+          final = { ...final, mode: "append" };
+        } else if (final.mode === "delete_last" && !vadConfirmed && final.confidence < MUTATION_MIN_CONFIDENCE) {
+          final = { ...final, mode: "noop" };
+        }
+        // 3c) Confidence guard for low-VAD clips: hallucinated edits from
         //    noise come back unsure — only confident mutations may land.
         //    noop is harmless either way; vad-ok clips skip the guard.
         const guardRejects =
@@ -733,14 +727,17 @@ export default function App() {
           return;
         }
         setProvisionalFrom(null);
-        setLines((prev) => applyResult(promotedAt !== null ? before : prev, final, target, takeId));
+        const res = final;
+        setLines((prev) => applyResult(promotedAt !== null ? before : prev, res, target, takeId));
         // Upload every take's audio immediately, whatever the line's fate
         void uploadTake(takeId, wavAndPcm.wav, {
-          latex: final.lines[0] ?? "",
+          latex: final.lines.join("\n"),
           transcript: final.transcript,
           note: final.note,
           confidence: final.confidence,
-        });
+          uncertain: final.uncertain,
+          asr: asrRef.current,
+        }, finalRequest);
       } else if (promotedAt !== null) {
         // Keep the promoted provisional as a solid line, but say why it's unconfirmed
         setProvisionalFrom(null);
@@ -750,7 +747,9 @@ export default function App() {
           transcript: liveResult?.transcript ?? "",
           note: liveResult?.note ?? "",
           confidence: liveResult?.confidence ?? 0,
-        });
+          uncertain: liveResult?.uncertain ?? false,
+          asr: asrRef.current,
+        }, liveRequestRef.current);
       } else {
         // No provisional existed: without this the attempt would vanish silently
         setProvisionalFrom(null);
@@ -803,10 +802,48 @@ export default function App() {
     setContextOpen(false);
   }, []);
 
+  // Empty the draft in place and hand focus back to the textarea, so fresh
+  // context can be typed without closing the dialog first.
+  const clearContextDraft = useCallback(() => {
+    setContextDraft("");
+    contextInputRef.current?.focus();
+  }, []);
+
   const openContextDialog = useCallback(() => {
     setContextDraft(source);
     setContextOpen(true);
   }, [source]);
+
+  // Typed correction for a wrong-marked line: Save persists it onto the wrong
+  // record (upsert), an empty input or Skip just closes the dialog.
+  const saveCorrection = useCallback(() => {
+    const line = linesRef.current.find((l) => l.id === reasonTargetIdRef.current);
+    if (line) {
+      const text = correctionDraft.trim().slice(0, REASON_MAX);
+      if (text) {
+        setReasons((prev) => ({ ...prev, [line.id]: text }));
+        void setWrongReason(
+          line.id,
+          line.takeId,
+          {
+            latex: line.latex,
+            transcript: line.transcript,
+            note: line.note,
+            confidence: line.confidence,
+            uncertain: line.uncertain,
+          },
+          text,
+        );
+      }
+    }
+    setCorrectionDraft("");
+    setReasonTargetId(null);
+  }, [correctionDraft]);
+
+  const skipCorrection = useCallback(() => {
+    setCorrectionDraft("");
+    setReasonTargetId(null);
+  }, []);
 
   const undo = useCallback(() => {
     setProvisionalFrom(null);
@@ -854,6 +891,7 @@ export default function App() {
         transcript: line.transcript,
         note: line.note,
         confidence: line.confidence,
+        uncertain: line.uncertain,
       };
       setVerdicts((prev) => {
         const next = { ...prev };
@@ -889,7 +927,7 @@ export default function App() {
       ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") ||
       ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "z");
     const onKeyDown = (e: KeyboardEvent) => {
-      if (contextOpen) return;
+      if (contextOpen || reasonTargetId !== null) return;
       if (isUndo(e)) {
         e.preventDefault();
         undo();
@@ -907,7 +945,7 @@ export default function App() {
       void start();
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      if (contextOpen) return;
+      if (contextOpen || reasonTargetId !== null) return;
       if (!isSpace(e)) return;
       void finish();
     };
@@ -917,7 +955,7 @@ export default function App() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [contextOpen, start, finish, undo, redo]);
+  }, [contextOpen, reasonTargetId, start, finish, undo, redo]);
 
   const listening = status === "listening";
   const thinking = status === "thinking";
@@ -967,7 +1005,8 @@ export default function App() {
                 onSetVerdict={(v) => {
                   setVerdict(i, v);
                   if (v === "wrong") {
-                    // Wrong-swipe prompts for a spoken "what's wrong" reason
+                    // Wrong-swipe opens the typed-correction dialog
+                    setCorrectionDraft("");
                     setReasonTargetId(line.id);
                   } else if (reasonTargetIdRef.current === line.id) {
                     setReasonTargetId(null);
@@ -985,7 +1024,7 @@ export default function App() {
       </main>
 
       {reasonLine && (
-        <div className="reason-sheet" role="status">
+        <div className="reason-sheet" role="dialog" aria-label="Typed correction">
           <div className="reason-what">
             <span className="reason-label">Marked wrong</span>
             <div
@@ -999,19 +1038,32 @@ export default function App() {
               }}
             />
           </div>
-          <p className="reason-ask">
-            What's wrong with it? <b>Hold the mic</b> and say it — your words get saved with the
-            mark.
-          </p>
-          <button
-            className="reason-skip"
-            onClick={() => {
-              if (statusRef.current === "listening") cancel();
-              setReasonTargetId(null);
+          <form
+            className="reason-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              saveCorrection();
             }}
           >
-            Skip
-          </button>
+            <input
+              className="reason-input"
+              value={correctionDraft}
+              onChange={(e) => setCorrectionDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") skipCorrection();
+              }}
+              placeholder="What should it be?"
+              spellCheck={false}
+              autoComplete="off"
+              autoFocus
+            />
+            <button type="submit" className="reason-save">
+              Save
+            </button>
+            <button type="button" className="reason-skip" onClick={skipCorrection}>
+              Skip
+            </button>
+          </form>
         </div>
       )}
 
@@ -1097,13 +1149,9 @@ export default function App() {
         <div className="context-overlay" role="dialog" aria-modal="true" aria-labelledby="context-title">
           <div className="context-dialog">
             <h2 id="context-title">Any context for the AI?</h2>
-            <p>
-              Paste anything that hints at what you're working on — text copied from Khan
-              Academy, LaTeX, or just a note. It helps the AI predict what comes next;
-              it's optional and never used to silently correct your math.
-            </p>
             <textarea
               className="context-input"
+              ref={contextInputRef}
               value={contextDraft}
               onChange={(e) => setContextDraft(e.target.value)}
               placeholder="e.g. the problem statement you copied, or the LaTeX of the previous steps…"
@@ -1111,6 +1159,9 @@ export default function App() {
               autoFocus
             />
             <div className="context-actions">
+              <button className="context-secondary context-clear" onClick={clearContextDraft}>
+                Clear
+              </button>
               <button className="context-secondary" onClick={skipContext}>
                 No context
               </button>

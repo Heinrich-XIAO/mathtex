@@ -16,7 +16,10 @@ export const saveTake = mutation({
     transcript: v.string(),
     note: v.string(),
     confidence: v.number(),
+    uncertain: v.optional(v.boolean()),
+    asr: v.optional(v.string()),
     dictatedAt: v.number(),
+    request: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db
@@ -30,6 +33,9 @@ export const saveTake = mutation({
         transcript: args.transcript,
         note: args.note,
         confidence: args.confidence,
+        uncertain: args.uncertain,
+        asr: args.asr,
+        ...(args.request !== undefined ? { request: args.request } : {}),
       });
       return;
     }
@@ -46,6 +52,7 @@ export const markWrong = mutation({
     transcript: v.string(),
     note: v.string(),
     confidence: v.number(),
+    uncertain: v.optional(v.boolean()),
     markedAt: v.number(),
     reason: v.optional(v.string()),
   },
@@ -59,7 +66,7 @@ export const markWrong = mutation({
   },
 });
 
-/** Attach or update the spoken "what's wrong" reason on a wrong mark.
+/** Attach or update the typed correction on a wrong mark.
  *  Upserts: if the mark hasn't landed yet (race), insert it complete. */
 export const setWrongReason = mutation({
   args: {
@@ -69,6 +76,7 @@ export const setWrongReason = mutation({
     transcript: v.string(),
     note: v.string(),
     confidence: v.number(),
+    uncertain: v.optional(v.boolean()),
     markedAt: v.number(),
     reason: v.string(),
   },
@@ -106,6 +114,7 @@ export const markCorrect = mutation({
     transcript: v.string(),
     note: v.string(),
     confidence: v.number(),
+    uncertain: v.optional(v.boolean()),
     markedAt: v.number(),
   },
   handler: async (ctx, args) => {

@@ -485,9 +485,9 @@ export default function App() {
   const [liveResult, setLiveResult] = useState<DictationResult | null>(null);
   const [provisionalFrom, setProvisionalFrom] = useState<number | null>(null);
   // Background context for the LLM: `source` is what gets sent, the dialog
-  // drafts an edit of it. Never opens on its own — only via the footer ghost.
+  // drafts an edit of it. Opens on every page load, prefilled from storage.
   const [source, setSource] = useState<string>(() => loadStoredContext());
-  const [contextOpen, setContextOpen] = useState(false);
+  const [contextOpen, setContextOpen] = useState(true);
   const [contextDraft, setContextDraft] = useState<string>(() => loadStoredContext());
   const contextInputRef = useRef<HTMLTextAreaElement | null>(null);
   const liveCoverageRef = useRef(0); // ms of audio covered by the last completed poll

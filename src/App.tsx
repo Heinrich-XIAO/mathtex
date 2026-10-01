@@ -14,6 +14,7 @@ import {
   liveConvert,
   liveTranscriptionEnabled,
   ConfigError,
+  authHeaders,
   type CallContext,
   type DictationResult,
 } from "./lib/api";
@@ -620,10 +621,12 @@ export default function App() {
     setPollWarning(false);
     liveCoverageRef.current = 0;
     asrRef.current = "";
-    // Warm the serverless function while the user is speaking (fire-and-forget)
+    // Warm the serverless function while the user is speaking (fire-and-forget).
+    // Authenticated so the ping exercises the full path instead of bouncing
+    // off the JWT gate — and stops spamming 401s into the server logs.
     void fetch("/api/chat/completions", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: "{}",
     }).catch(() => {});
     const ptt = recorderRef.current ?? (recorderRef.current = new PushToTalk());
@@ -779,7 +782,13 @@ export default function App() {
           finalErr = e2;
         }
       }
-      const describe = (e: unknown) => (e instanceof Error ? e.message : String(e));
+      const describe = (e: unknown) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        // The browser's raw network failure — say what it means to a student.
+        return msg === "Failed to fetch" || msg === "Load failed"
+          ? "network unreachable — check your connection and retry"
+          : msg;
+      };
       if (final) {
         // 3b) Recovery bias for destructive modes: the corpus's only destructive
         //    failure (a 0.58-confidence replace clobbering a good line) is

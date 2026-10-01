@@ -26,3 +26,20 @@ export function setAuthToken(next: string | null): void {
 export function authToken(): string | null {
   return token;
 }
+
+/** AuthBridge registers the provider's fetchAccessToken here so non-React
+ *  code (api.ts) can force a fresh JWT when an edge call comes back 401. */
+let refresher: (() => Promise<string | null>) | null = null;
+
+export function registerTokenRefresher(fn: () => Promise<string | null>): void {
+  refresher = fn;
+}
+
+export async function refreshAuthToken(): Promise<string | null> {
+  if (!refresher) return null;
+  try {
+    return await refresher();
+  } catch {
+    return null;
+  }
+}

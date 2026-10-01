@@ -1,6 +1,6 @@
 import { SYSTEM_PROMPT } from "./prompt";
 import { pcmToWav } from "./wav";
-import { authToken } from "./authClient";
+import { authToken, refreshAuthToken } from "./authClient";
 
 export type Mode = "append" | "append_lines" | "replace_line" | "delete_last" | "noop";
 
@@ -28,9 +28,29 @@ const LIVE_TRANSCRIBE_MODEL = String(import.meta.env.VITE_LIVE_TRANSCRIBE_MODEL 
 
 /** The Vercel edge functions verify this Convex-issued JWT before touching
  *  the upstream key; omit when signed out (prod gate returns 401). */
-function authHeaders(): Record<string, string> {
+export function authHeaders(): Record<string, string> {
   const token = authToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+/** POST with auth; on 401 the Bearer header was missing or stale (refresh
+ *  gap) — force one token refresh and retry before failing the call. */
+async function authPost(
+  path: string,
+  init: { headers?: Record<string, string>; body: string; signal?: AbortSignal },
+): Promise<Response> {
+  const send = () =>
+    fetch(`${BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...init.headers, ...authHeaders() },
+      body: init.body,
+      signal: init.signal,
+    });
+  let res = await send();
+  if (res.status === 401 && (await refreshAuthToken())) {
+    res = await send();
+  }
+  return res;
 }
 
 export class ConfigError extends Error {}
@@ -139,9 +159,8 @@ export async function liveConvert(
   pcm: Float32Array,
   ctx: CallContext,
 ): Promise<{ transcript: string; result: DictationResult | null; request: string }> {
-  const res = await fetch(`${BASE}/transcribe`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
+  const res = await authPost("/transcribe", {
+    headers: {},
     body: JSON.stringify({
       audioB64: arrayBufferToBase64(pcmToWav(pcm)),
       systemPrompt: SYSTEM_PROMPT,
@@ -201,11 +220,8 @@ async function dictateAudioLlm(
       ...(useJsonFormat ? { response_format: { type: "json_object" } } : {}),
       messages,
     };
-    const res = await fetch(`${BASE}/chat/completions`, {
-      method: "POST",
+    const res = await authPost("/chat/completions", {
       headers: {
-        "Content-Type": "application/json",
-        ...authHeaders(),
         // Client-side VAD diagnostics for the server logs; stripped by the
         // proxy before forwarding upstream.
         ...(opts?.vadStats ? { "x-vad-stats": opts.vadStats.slice(0, 300) } : {}),
@@ -249,9 +265,7 @@ async function dictateAudioLlm(
         },
       ],
     };
-    const retryRes = await fetch(`${BASE}/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
+    const retryRes = await authPost("/chat/completions", {
       body: JSON.stringify(retryBody),
       signal,
     });

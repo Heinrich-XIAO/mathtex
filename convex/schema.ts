@@ -37,6 +37,33 @@ export default defineSchema({
     .index("by_takeId", ["takeId"])
     .index("by_user_takeId", ["userId", "takeId"]),
 
+  // Workspace: one file = one ordered stack of dictated lines. Per-user,
+  // written through from the client on every lines change.
+  files: defineTable({
+    userId: v.id("users"),
+    name: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_user_updated", ["userId", "updatedAt"]),
+
+  lines: defineTable({
+    userId: v.id("users"),
+    fileId: v.id("files"),
+    // Client-generated stable id: verdicts/reasons are keyed by it, and it
+    // survives undo/redo restores (re-inserting a line gets a new _id but
+    // keeps its lineId, so marks keep pointing at the right line).
+    lineId: v.string(),
+    takeId: v.string(),
+    latex: v.string(),
+    transcript: v.string(),
+    confidence: v.number(),
+    uncertain: v.optional(v.boolean()),
+    note: v.string(),
+    order: v.number(),
+  })
+    .index("by_file_order", ["fileId", "order"])
+    .index("by_lineId", ["lineId"]),
+
   // Verdicts. Deleting the line in the UI does NOT remove these —
   // they are a historical record. Unmarking does.
   wrongLines: defineTable({

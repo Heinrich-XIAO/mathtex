@@ -107,8 +107,14 @@ Measured baseline (prod, gemini-3.8-flash): 3.3–5.4s, ~480 reasoning tokens pe
 
 - **M1 — DONE, deployed to https://mathtex.vercel.app.** Push-to-talk → WAV → same-origin `/api` → serverless proxy → upstream LLM → JSON → KaTeX. Verified end-to-end on prod: espeak audio of the dy/dx example → `\frac{dy}{dx} = x^2 \cdot x^3`, confidence 0.98, `audio_tokens: 97`. Local https deploy (self-signed cert) also running on :4173.
 - **M2 partial — shipped early:** `append_lines` mode (one utterance → multiple lines, e.g. worked steps) and per-line voice targeting (mini-mic on each line; "get rid of the x² after the x⁴" edits only that line via `replace_line` + target index in context). No-unspoken-algebra rule stays. Verified in browser.
-- **M2 — remaining:** Dexie files/multi-line persistence, undo.
-- **M3 — next:** settings UI (model dropdown via /api/models), PNG/SVG export, undo, PWA.
+- **M2 — DONE.** Files/multi-line persistence + undo shipped:
+  - **Storage pivot: Convex, not Dexie.** The plan's Dexie decision predates the auth pivot (Google OAuth + per-user scoping); with the whole app auth-gated and verdicts already in Convex, a local-only store would split data across two stores and start empty on every other device. Workspace now persists per-user in Convex.
+  - `files` + `lines` tables (per-user; `lineId` is client-generated and stable, so verdict records keep pointing at the right line across undo/redo restores — re-inserting a line gets a new `_id` but keeps its `lineId`).
+  - `convex/workspace.ts`: `list/create/rename/remove/getLines/syncLines`, all `requireUser`-gated. `syncLines` replaces the file's whole stack (delete-all + re-insert with `order=index`) — files are worksheets, so full-stack writes beat diffs and make undo/redo trivial.
+  - Client write-through (`src/lib/workspace.ts`): every committed lines change (dictate, delete, undo, redo, switch) pushes to Convex; rapid edits coalesce into one in-flight write of the latest stack, so out-of-order writes can't resurrect a stale snapshot.
+  - File bar UI: chips (switch / inline rename / two-tap delete / new). Undo history is per-file; verdicts + typed reasons survive file switches (keyed by stable line ids).
+  - Undo/redo was already in place from the verdicts work; it now also survives reload.
+- **M3 — next:** settings UI (model dropdown via /api/models), PNG/SVG export, PWA.
 
 ## Deploy notes
 
@@ -119,5 +125,5 @@ Measured baseline (prod, gemini-3.8-flash): 3.3–5.4s, ~480 reasoning tokens pe
 ## Milestones
 
 - **M1 — Core loop:** push-to-talk → proxy → JSON → KaTeX on screen. Single line, key server-side. The dy/dx example works end-to-end. ✅
-- **M2 — Product:** Dexie files/multi-line, conversational editing, transcript captions, confidence states, copy.
-- **M3 — Finish:** settings UI (model dropdown), PNG/SVG export, undo, PWA.
+- **M2 — Product:** ~~Dexie files/multi-line~~ → Convex files/multi-line (see Status), conversational editing, transcript captions, confidence states, copy, undo. ✅
+- **M3 — Finish:** settings UI (model dropdown), PNG/SVG export, PWA.

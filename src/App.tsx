@@ -26,6 +26,17 @@ import {
   uploadTake,
 } from "./lib/persist";
 import { useInstall } from "./lib/install";
+import {
+  type FileMeta,
+  type LineData,
+  createFile,
+  deleteFile,
+  listFiles,
+  loadLines,
+  pushLines,
+  renameFile,
+  serializeLines,
+} from "./lib/workspace";
 import { useConvexAuth, useAuthActions } from "@convex-dev/auth/react";
 import Landing from "./Landing";
 
@@ -126,6 +137,19 @@ function applyResult(
   }
 }
 
+/** The persisted line shape (workspace.ts) back into a UI line. */
+function toLine(w: LineData): Line {
+  return {
+    id: w.lineId,
+    takeId: w.takeId,
+    latex: w.latex,
+    transcript: w.transcript,
+    confidence: w.confidence,
+    uncertain: w.uncertain,
+    note: w.note,
+  };
+}
+
 function MicGlyph({ size = 16 }: { size?: number }) {
   return (
     <svg viewBox="0 0 24 24" width={size} height={size} fill="currentColor" aria-hidden>
@@ -199,6 +223,24 @@ function ContextGlyph() {
       <polyline points="14 2 14 8 20 8" />
       <line x1="8" y1="13" x2="16" y2="13" />
       <line x1="8" y1="17" x2="13" y2="17" />
+    </svg>
+  );
+}
+
+function PencilGlyph() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={11}
+      height={11}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.4}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z" />
     </svg>
   );
 }
@@ -503,6 +545,14 @@ export default function App() {
   const [correctionDraft, setCorrectionDraft] = useState("");
   const [past, setPast] = useState<Line[][]>([]);
   const [future, setFuture] = useState<Line[][]>([]);
+  // Workspace persistence (Convex): file list + the active file's stack,
+  // written through on every lines change.
+  const [files, setFiles] = useState<FileMeta[]>([]);
+  const [activeFileId, setActiveFileId] = useState<string | null>(null);
+  const [wsLoading, setWsLoading] = useState(true);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [targetIndex, setTargetIndex] = useState<number | undefined>(undefined);
   const [liveResult, setLiveResult] = useState<DictationResult | null>(null);
   const [provisionalFrom, setProvisionalFrom] = useState<number | null>(null);
@@ -537,6 +587,19 @@ export default function App() {
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
+  const activeFileIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeFileIdRef.current = activeFileId;
+  }, [activeFileId]);
+  const renamingIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    renamingIdRef.current = renamingId;
+  }, [renamingId]);
+  // Guards the sync effect while a file switch/boot is swapping the stack —
+  // a mid-switch write could otherwise push one file's lines under another.
+  const switchLockRef = useRef(false);
+  const lastSyncRef = useRef("");
+  const bootRef = useRef<Promise<void> | null>(null);
 
   const stopLivePolls = useCallback(() => {
     if (liveTimer.current !== null) {
@@ -950,19 +1013,21 @@ export default function App() {
       ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "z");
     const onKeyDown = (e: KeyboardEvent) => {
       if (contextOpen || reasonTargetId !== null) return;
+      const t = e.target as HTMLElement | null;
+      const typing = !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA");
       if (isUndo(e)) {
+        if (typing) return; // inputs keep their own undo
         e.preventDefault();
         undo();
         return;
       }
       if (isRedo(e)) {
+        if (typing) return;
         e.preventDefault();
         redo();
         return;
       }
-      if (!isSpace(e) || e.repeat) return;
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+      if (!isSpace(e) || e.repeat || typing) return;
       e.preventDefault();
       void start();
     };
@@ -987,7 +1052,163 @@ export default function App() {
   const { isLoading, isAuthenticated } = useConvexAuth();
   const { signOut } = useAuthActions();
 
-  if (isLoading) {
+  const wsLines = useMemo<LineData[]>(
+    () =>
+      lines.map((l) => ({
+        lineId: l.id,
+        takeId: l.takeId,
+        latex: l.latex,
+        transcript: l.transcript,
+        confidence: l.confidence,
+        uncertain: l.uncertain,
+        note: l.note,
+      })),
+    [lines],
+  );
+
+  // Workspace boot: open the newest file (creating a first one for new
+  // users). bootRef holds the in-flight promise so StrictMode's double
+  // effect can't create two Untitled files.
+  const bootWorkspace = useCallback(() => {
+    if (bootRef.current) return;
+    bootRef.current = (async () => {
+      setWsLoading(true);
+      try {
+        let list = await listFiles();
+        if (list.length === 0) {
+          const id = await createFile("Untitled");
+          if (id) list = [{ id, name: "Untitled", updatedAt: Date.now() }];
+        }
+        setFiles(list);
+        const first = list[0];
+        if (first) {
+          switchLockRef.current = true;
+          setActiveFileId(first.id);
+          const loaded = await loadLines(first.id);
+          if (loaded) {
+            setLines(loaded.map(toLine));
+            lastSyncRef.current = serializeLines(loaded);
+          }
+          switchLockRef.current = false;
+        }
+      } catch (e) {
+        console.warn("[workspace] boot failed", e);
+      } finally {
+        setWsLoading(false);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      bootWorkspace();
+    } else if (bootRef.current) {
+      // Signed out: clear workspace state so the next sign-in boots fresh
+      bootRef.current = null;
+      setFiles([]);
+      setActiveFileId(null);
+      setLines([]);
+      setVerdicts({});
+      setReasons({});
+      setPast([]);
+      setFuture([]);
+      setWsLoading(true);
+    }
+  }, [isAuthenticated, bootWorkspace]);
+
+  // Write-through: every committed lines change (dictate, delete, undo,
+  // redo, file switch) lands in Convex. lastSyncRef skips no-op rewrites;
+  // pushLines coalesces bursts into the latest stack.
+  useEffect(() => {
+    if (!activeFileId || !isAuthenticated || switchLockRef.current) return;
+    const payload = serializeLines(wsLines);
+    if (payload === lastSyncRef.current) return;
+    lastSyncRef.current = payload;
+    void pushLines(activeFileId, wsLines).catch(() => {
+      // Failed write: clear the marker so the next change retries it
+      lastSyncRef.current = "";
+    });
+  }, [wsLines, activeFileId, isAuthenticated]);
+
+  // Switch files: history resets (undo is per-file); verdicts and typed
+  // reasons survive — they're keyed by globally-unique line ids.
+  const switchFile = useCallback(async (f: FileMeta) => {
+    if (f.id === activeFileIdRef.current) return;
+    switchLockRef.current = true;
+    setConfirmDeleteId(null);
+    setRenamingId(null);
+    setActiveFileId(f.id);
+    setLines([]);
+    setPast([]);
+    setFuture([]);
+    lastSyncRef.current = "[]";
+    const loaded = await loadLines(f.id);
+    if (loaded) {
+      setLines(loaded.map(toLine));
+      lastSyncRef.current = serializeLines(loaded);
+    }
+    switchLockRef.current = false;
+  }, []);
+
+  const newFile = useCallback(async () => {
+    const id = await createFile("Untitled");
+    if (!id) return;
+    const file: FileMeta = { id, name: "Untitled", updatedAt: Date.now() };
+    setFiles((prev) => [file, ...prev]);
+    await switchFile(file);
+  }, [switchFile]);
+
+  const beginRename = useCallback((f: FileMeta) => {
+    setConfirmDeleteId(null);
+    setRenamingId(f.id);
+    setRenameDraft(f.name);
+  }, []);
+
+  const commitRename = useCallback(() => {
+    const id = renamingIdRef.current;
+    setRenamingId(null);
+    if (!id) return;
+    const name = renameDraft.trim().slice(0, 60) || "Untitled";
+    setFiles((prev) => prev.map((f) => (f.id === id ? { ...f, name } : f)));
+    void renameFile(id, name);
+  }, [renameDraft]);
+
+  // Delete file: two taps (the ✕ becomes "Sure?" for 2.5s), no native confirm.
+  const removeFileAction = useCallback(
+    (f: FileMeta) => {
+      if (confirmDeleteId !== f.id) {
+        setConfirmDeleteId(f.id);
+        window.setTimeout(() => {
+          setConfirmDeleteId((cur) => (cur === f.id ? null : cur));
+        }, 2500);
+        return;
+      }
+      setConfirmDeleteId(null);
+      void (async () => {
+        await deleteFile(f.id);
+        const rest = files.filter((x) => x.id !== f.id);
+        setFiles(rest);
+        if (f.id === activeFileIdRef.current) {
+          if (rest[0]) {
+            await switchFile(rest[0]);
+          } else {
+            switchLockRef.current = true;
+            setActiveFileId(null);
+            setLines([]);
+            setPast([]);
+            setFuture([]);
+            lastSyncRef.current = "[]";
+            switchLockRef.current = false;
+          }
+        }
+      })();
+    },
+    [confirmDeleteId, files, switchFile],
+  );
+
+  // wsLoading only gates the signed-in path — an unauthenticated visitor
+  // must reach the Landing page, not wait on a workspace that never boots.
+  if (isLoading || (isAuthenticated && wsLoading)) {
     return (
       <div className="landing">
         <div className="landing-card">
@@ -1000,6 +1221,59 @@ export default function App() {
 
   return (
     <div className={`app${listening ? " listening" : ""}`}>
+      <header className="filebar">
+        {files.map((f) => {
+          const active = f.id === activeFileId;
+          return (
+            <div key={f.id} className={`file-chip${active ? " active" : ""}`}>
+              {renamingId === f.id ? (
+                <input
+                  className="file-rename-input"
+                  value={renameDraft}
+                  onChange={(e) => setRenameDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") setRenamingId(null);
+                  }}
+                  onBlur={commitRename}
+                  autoFocus
+                  spellCheck={false}
+                  autoComplete="off"
+                  aria-label="File name"
+                />
+              ) : (
+                <>
+                  <button className="file-name" onClick={() => void switchFile(f)}>
+                    {f.name}
+                  </button>
+                  {active && (
+                    <>
+                      <button
+                        className="file-action"
+                        onClick={() => beginRename(f)}
+                        title="Rename file"
+                        aria-label="Rename file"
+                      >
+                        <PencilGlyph />
+                      </button>
+                      <button
+                        className={`file-action danger${confirmDeleteId === f.id ? " confirm" : ""}`}
+                        onClick={() => removeFileAction(f)}
+                        title={confirmDeleteId === f.id ? "Click again to delete" : "Delete file"}
+                        aria-label="Delete file"
+                      >
+                        {confirmDeleteId === f.id ? "Sure?" : <XGlyph size={11} />}
+                      </button>
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+          );
+        })}
+        <button className="file-new" onClick={() => void newFile()} title="New file" aria-label="New file">
+          +
+        </button>
+      </header>
       <main className="stage">
         {error && (
           <div className="error-banner" role="alert">

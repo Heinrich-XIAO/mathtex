@@ -812,3 +812,103 @@ body {
 .landing-google:hover {
   background: #f3f4f6;
 }
+
+/* File bar: chips across the top, newest file first */
+.filebar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 12px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.filebar::-webkit-scrollbar {
+  display: none;
+}
+
+.file-chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  padding: 4px 6px 4px 12px;
+  border: 1px solid var(--card-edge);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  transition: border-color 150ms, color 150ms;
+}
+
+.file-chip.active {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.file-name {
+  background: none;
+  border: 0;
+  padding: 0 4px;
+  color: inherit;
+  font: inherit;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.file-action {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.75rem;
+}
+
+.file-action:hover {
+  color: var(--text);
+}
+
+.file-action.danger:hover {
+  color: var(--red);
+}
+
+.file-action.confirm {
+  color: var(--red);
+  padding: 4px 7px;
+}
+
+.file-new {
+  flex: none;
+  width: 27px;
+  height: 27px;
+  border: 1px dashed var(--card-edge);
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+  font-size: 1.05rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.file-new:hover {
+  color: var(--text);
+  border-color: var(--muted);
+}
+
+.file-rename-input {
+  width: 120px;
+  padding: 1px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+  outline: none;
+}

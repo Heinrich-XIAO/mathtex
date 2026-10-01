@@ -81,6 +81,10 @@ export default defineSchema({
     // after the wrong-swipe in the dialog. Optional: marks can land before
     // the correction is typed.
     reason: v.optional(v.string()),
+    // Decision latency: ms from the line's dictation (the take's dictatedAt)
+    // to this mark, computed server-side. Absent when the take row wasn't
+    // visible yet (seeded legacy lines) or the clock ran backwards.
+    latencyMs: v.optional(v.number()),
   })
     .index("by_lineId", ["lineId"])
     .index("by_takeId", ["takeId"]),
@@ -96,6 +100,7 @@ export default defineSchema({
     confidence: v.number(),
     uncertain: v.optional(v.boolean()),
     markedAt: v.number(),
+    latencyMs: v.optional(v.number()),
   })
     .index("by_lineId", ["lineId"])
     .index("by_takeId", ["takeId"]),

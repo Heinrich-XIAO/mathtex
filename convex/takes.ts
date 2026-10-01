@@ -13,6 +13,24 @@ async function requireUser(ctx: MutationCtx): Promise<Id<"users">> {
   return userId;
 }
 
+/** Decision latency for a verdict: ms from the line's dictation (the take's
+ *  dictatedAt) to the mark. Absent when the take row isn't visible yet
+ *  (seeded legacy lines) or the mark precedes it (clock skew). */
+async function verdictLatency(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+  takeId: string,
+  markedAt: number,
+): Promise<number | undefined> {
+  const take = await ctx.db
+    .query("takes")
+    .withIndex("by_user_takeId", (q) => q.eq("userId", userId).eq("takeId", takeId))
+    .unique();
+  if (!take) return undefined;
+  const latency = markedAt - take.dictatedAt;
+  return latency >= 0 ? latency : undefined;
+}
+
 /** Hand out a short-lived upload URL for one take's audio file. */
 export const generateUploadUrl = mutation({
   args: {},
@@ -82,7 +100,12 @@ export const markWrong = mutation({
       .withIndex("by_lineId", (q) => q.eq("lineId", args.lineId))
       .unique();
     if (existing) return;
-    await ctx.db.insert("wrongLines", { ...args, userId });
+    const latencyMs = await verdictLatency(ctx, userId, args.takeId, args.markedAt);
+    await ctx.db.insert("wrongLines", {
+      ...args,
+      ...(latencyMs !== undefined ? { latencyMs } : {}),
+      userId,
+    });
   },
 });
 
@@ -110,7 +133,12 @@ export const setWrongReason = mutation({
       await ctx.db.patch(existing._id, { reason: args.reason });
       return;
     }
-    await ctx.db.insert("wrongLines", { ...args, userId });
+    const latencyMs = await verdictLatency(ctx, userId, args.takeId, args.markedAt);
+    await ctx.db.insert("wrongLines", {
+      ...args,
+      ...(latencyMs !== undefined ? { latencyMs } : {}),
+      userId,
+    });
   },
 });
 
@@ -146,7 +174,12 @@ export const markCorrect = mutation({
       .withIndex("by_lineId", (q) => q.eq("lineId", args.lineId))
       .unique();
     if (existing) return;
-    await ctx.db.insert("correctLines", { ...args, userId });
+    const latencyMs = await verdictLatency(ctx, userId, args.takeId, args.markedAt);
+    await ctx.db.insert("correctLines", {
+      ...args,
+      ...(latencyMs !== undefined ? { latencyMs } : {}),
+      userId,
+    });
   },
 });
 

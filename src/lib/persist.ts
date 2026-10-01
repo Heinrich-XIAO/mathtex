@@ -1,15 +1,9 @@
-import { ConvexHttpClient } from "convex/browser";
 import type { Id } from "../../convex/_generated/dataModel";
 import { api } from "../../convex/_generated/api";
+import { getConvexClient } from "./authClient";
 
-const URL = import.meta.env.VITE_CONVEX_URL as string | undefined;
-
-let client: ConvexHttpClient | null = null;
-
-function getClient(): ConvexHttpClient | null {
-  if (!URL) return null;
-  if (!client) client = new ConvexHttpClient(URL);
-  return client;
+function getClient() {
+  return getConvexClient();
 }
 
 export interface TakeMeta {

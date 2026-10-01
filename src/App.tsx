@@ -26,6 +26,8 @@ import {
   uploadTake,
 } from "./lib/persist";
 import { useInstall } from "./lib/install";
+import { useConvexAuth, useAuthActions } from "@convex-dev/auth/react";
+import Landing from "./Landing";
 
 type Status = "idle" | "listening" | "thinking" | "error";
 
@@ -156,6 +158,26 @@ function InstallGlyph() {
   return (
     <svg viewBox="0 0 24 24" width={16} height={16} fill="currentColor" aria-hidden>
       <path d="M12 3v10.17l-3.59-3.58L7 11l5 5 5-5-1.41-1.41L12 13.17V3zM5 19h14v2H5z" />
+    </svg>
+  );
+}
+
+function SignOutGlyph() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={15}
+      height={15}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+      <polyline points="16 17 21 12 16 7" />
+      <line x1="21" y1="12" x2="9" y2="12" />
     </svg>
   );
 }
@@ -962,6 +984,20 @@ export default function App() {
   const reasonLine = reasonTargetId ? lines.find((l) => l.id === reasonTargetId) : undefined;
   const { mode: installMode, install, dismiss: dismissInstall } = useInstall();
 
+  const { isLoading, isAuthenticated } = useConvexAuth();
+  const { signOut } = useAuthActions();
+
+  if (isLoading) {
+    return (
+      <div className="landing">
+        <div className="landing-card">
+          <p className="landing-muted">Loading…</p>
+        </div>
+      </div>
+    );
+  }
+  if (!isAuthenticated) return <Landing />;
+
   return (
     <div className={`app${listening ? " listening" : ""}`}>
       <main className="stage">
@@ -1086,6 +1122,9 @@ export default function App() {
           </button>
           <button className="ghost" disabled={future.length === 0} onClick={redo} title="Redo (Ctrl+Shift+Z)">
             <ArrowGlyph mirrored />
+          </button>
+          <button className="ghost" onClick={() => void signOut()} title="Sign out">
+            <SignOutGlyph />
           </button>
         </div>
         <div className="dictation">

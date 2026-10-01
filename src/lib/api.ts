@@ -1,5 +1,6 @@
 import { SYSTEM_PROMPT } from "./prompt";
 import { pcmToWav } from "./wav";
+import { authToken } from "./authClient";
 
 export type Mode = "append" | "append_lines" | "replace_line" | "delete_last" | "noop";
 
@@ -24,6 +25,13 @@ const BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 const MODEL = import.meta.env.VITE_MODEL || "google/gemini-3.8-flash";
 // Live poll model (display-only partials during the hold)
 const LIVE_TRANSCRIBE_MODEL = String(import.meta.env.VITE_LIVE_TRANSCRIBE_MODEL || "");
+
+/** The Vercel edge functions verify this Convex-issued JWT before touching
+ *  the upstream key; omit when signed out (prod gate returns 401). */
+function authHeaders(): Record<string, string> {
+  const token = authToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
 
 export class ConfigError extends Error {}
 
@@ -133,7 +141,7 @@ export async function liveConvert(
 ): Promise<{ transcript: string; result: DictationResult | null; request: string }> {
   const res = await fetch(`${BASE}/transcribe`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({
       audioB64: arrayBufferToBase64(pcmToWav(pcm)),
       systemPrompt: SYSTEM_PROMPT,
@@ -197,6 +205,7 @@ async function dictateAudioLlm(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        ...authHeaders(),
         // Client-side VAD diagnostics for the server logs; stripped by the
         // proxy before forwarding upstream.
         ...(opts?.vadStats ? { "x-vad-stats": opts.vadStats.slice(0, 300) } : {}),
@@ -242,7 +251,7 @@ async function dictateAudioLlm(
     };
     const retryRes = await fetch(`${BASE}/chat/completions`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify(retryBody),
       signal,
     });

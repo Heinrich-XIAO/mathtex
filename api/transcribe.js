@@ -3,6 +3,8 @@
 // contextText?, model? } -> { transcript, raw }
 // The client renders raw (a standard dictation JSON) as the provisional
 // equation; voice canceling emerges from the system prompt's own modes.
+import { verifyAuth, unauthorized } from "./_lib.js";
+
 const TARGET = process.env.UPSTREAM_BASE_URL;
 const KEY = process.env.OPENROUTER_API_KEY;
 const DEFAULT_TRANSCRIBER = "fish-audio/transcribe-1";
@@ -14,6 +16,8 @@ const trunc = (s, n = 160) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
 export default async function handler(request) {
   const t0 = Date.now();
+  const userId = await verifyAuth(request);
+  if (!userId) return unauthorized("missing/invalid/expired token");
   if (!TARGET || !KEY) {
     return Response.json({ error: { message: "Missing UPSTREAM_BASE_URL or OPENROUTER_API_KEY" } }, { status: 500 });
   }
@@ -45,7 +49,7 @@ export default async function handler(request) {
     return Response.json({ error: { message: String(e).slice(0, 200) } }, { status: 502 });
   }
   if (!transcript) {
-    console.log(JSON.stringify({ route: "transcribe", model, transcript: "", ms: Date.now() - t0 }));
+    console.log(JSON.stringify({ route: "transcribe", model, user: userId, transcript: "", ms: Date.now() - t0 }));
     return Response.json({ transcript: "", raw: "" });
   }
 
@@ -81,7 +85,7 @@ export default async function handler(request) {
     const data = await res.json();
     const content = data.choices?.[0]?.message?.content ?? "";
     console.log(
-      JSON.stringify({ route: "transcribe", model, transcript: trunc(transcript), raw: trunc(content), ms: Date.now() - t0 }),
+      JSON.stringify({ route: "transcribe", model, user: userId, transcript: trunc(transcript), raw: trunc(content), ms: Date.now() - t0 }),
     );
     return Response.json({ transcript, raw: content, request: JSON.stringify(chatBody) });
   } catch (e) {

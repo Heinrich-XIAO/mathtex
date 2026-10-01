@@ -1,10 +1,22 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
+import { authTables } from "@convex-dev/auth/server";
 
 export default defineSchema({
+  ...authTables,
+  // Convex Auth's users table, plus an email index for the one-time backfill.
+  users: defineTable({
+    name: v.optional(v.string()),
+    email: v.optional(v.string()),
+    emailVerificationTime: v.optional(v.number()),
+    image: v.optional(v.string()),
+    isAnonymous: v.optional(v.boolean()),
+  }).index("email", ["email"]),
+
   // One row per dictated take: the audio is uploaded here immediately after
   // transcription, so it exists even if the line is never marked wrong.
   takes: defineTable({
+    userId: v.optional(v.id("users")),
     takeId: v.string(),
     storageId: v.id("_storage"),
     latex: v.string(),
@@ -21,11 +33,14 @@ export default defineSchema({
     // model, temperature, response_format, full message array. Base64 audio
     // inside is replaced by a placeholder; the clip itself is in _storage.
     request: v.optional(v.string()),
-  }).index("by_takeId", ["takeId"]),
+  })
+    .index("by_takeId", ["takeId"])
+    .index("by_user_takeId", ["userId", "takeId"]),
 
   // Verdicts. Deleting the line in the UI does NOT remove these —
   // they are a historical record. Unmarking does.
   wrongLines: defineTable({
+    userId: v.optional(v.id("users")),
     lineId: v.string(),
     takeId: v.string(),
     latex: v.string(),
@@ -45,6 +60,7 @@ export default defineSchema({
 
   // Correct-verdicts, same shape and lifetime as wrongLines.
   correctLines: defineTable({
+    userId: v.optional(v.id("users")),
     lineId: v.string(),
     takeId: v.string(),
     latex: v.string(),

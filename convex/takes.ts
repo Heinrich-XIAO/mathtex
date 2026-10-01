@@ -1,13 +1,31 @@
 import { v } from "convex/values";
+import { getAuthUserId } from "@convex-dev/auth/server";
+import type { Id } from "./_generated/dataModel";
 import { mutation } from "./_generated/server";
+import type { MutationCtx } from "./_generated/server";
+
+type UserTable = "takes" | "wrongLines" | "correctLines";
+
+/** Every write goes through here: no identity, no write. */
+async function requireUser(ctx: MutationCtx): Promise<Id<"users">> {
+  const userId = await getAuthUserId(ctx);
+  if (userId === null) throw new Error("Unauthenticated");
+  return userId;
+}
 
 /** Hand out a short-lived upload URL for one take's audio file. */
 export const generateUploadUrl = mutation({
   args: {},
-  handler: async (ctx) => await ctx.storage.generateUploadUrl(),
+  handler: async (ctx) => {
+    await requireUser(ctx);
+    return await ctx.storage.generateUploadUrl();
+  },
 });
 
-/** Persist a take: audio storage id + the transcription metadata. */
+/** Persist a take: audio storage id + the transcription metadata.
+ *  Idempotent per (user, takeId); adopts an orphan row left over from
+ *  before auth, so a re-dictated legacy takeId becomes owned instead of
+ *  colliding. */
 export const saveTake = mutation({
   args: {
     takeId: v.string(),
@@ -22,9 +40,10 @@ export const saveTake = mutation({
     request: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const userId = await requireUser(ctx);
     const existing = await ctx.db
       .query("takes")
-      .withIndex("by_takeId", (q) => q.eq("takeId", args.takeId))
+      .withIndex("by_user_takeId", (q) => q.eq("userId", userId).eq("takeId", args.takeId))
       .unique();
     if (existing) {
       await ctx.db.patch(existing._id, {
@@ -39,7 +58,7 @@ export const saveTake = mutation({
       });
       return;
     }
-    await ctx.db.insert("takes", args);
+    await ctx.db.insert("takes", { ...args, userId });
   },
 });
 
@@ -57,12 +76,13 @@ export const markWrong = mutation({
     reason: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const userId = await requireUser(ctx);
     const existing = await ctx.db
       .query("wrongLines")
       .withIndex("by_lineId", (q) => q.eq("lineId", args.lineId))
       .unique();
     if (existing) return;
-    await ctx.db.insert("wrongLines", args);
+    await ctx.db.insert("wrongLines", { ...args, userId });
   },
 });
 
@@ -81,6 +101,7 @@ export const setWrongReason = mutation({
     reason: v.string(),
   },
   handler: async (ctx, args) => {
+    const userId = await requireUser(ctx);
     const existing = await ctx.db
       .query("wrongLines")
       .withIndex("by_lineId", (q) => q.eq("lineId", args.lineId))
@@ -89,7 +110,7 @@ export const setWrongReason = mutation({
       await ctx.db.patch(existing._id, { reason: args.reason });
       return;
     }
-    await ctx.db.insert("wrongLines", args);
+    await ctx.db.insert("wrongLines", { ...args, userId });
   },
 });
 
@@ -97,11 +118,12 @@ export const setWrongReason = mutation({
 export const unmarkWrong = mutation({
   args: { lineId: v.string() },
   handler: async (ctx, args) => {
+    const userId = await requireUser(ctx);
     const existing = await ctx.db
       .query("wrongLines")
       .withIndex("by_lineId", (q) => q.eq("lineId", args.lineId))
       .unique();
-    if (existing) await ctx.db.delete(existing._id);
+    if (existing && existing.userId === userId) await ctx.db.delete(existing._id);
   },
 });
 
@@ -118,12 +140,13 @@ export const markCorrect = mutation({
     markedAt: v.number(),
   },
   handler: async (ctx, args) => {
+    const userId = await requireUser(ctx);
     const existing = await ctx.db
       .query("correctLines")
       .withIndex("by_lineId", (q) => q.eq("lineId", args.lineId))
       .unique();
     if (existing) return;
-    await ctx.db.insert("correctLines", args);
+    await ctx.db.insert("correctLines", { ...args, userId });
   },
 });
 
@@ -131,10 +154,44 @@ export const markCorrect = mutation({
 export const unmarkCorrect = mutation({
   args: { lineId: v.string() },
   handler: async (ctx, args) => {
+    const userId = await requireUser(ctx);
     const existing = await ctx.db
       .query("correctLines")
       .withIndex("by_lineId", (q) => q.eq("lineId", args.lineId))
       .unique();
-    if (existing) await ctx.db.delete(existing._id);
+    if (existing && existing.userId === userId) await ctx.db.delete(existing._id);
+  },
+});
+
+/** One-off: assign every pre-auth orphan row to the given email's user
+ *  account. Runs from the CLI (unauthenticated), so it's gated by a secret
+ *  stored as the ADMIN_BACKFILL_SECRET deployment env var. */
+export const backfillOrphans = mutation({
+  args: { secret: v.string(), email: v.string() },
+  handler: async (ctx, args) => {
+    // process isn't in the app-side type graph (this file is pulled into the
+    // Vite tsconfig via _generated/api), so reach for it untyped.
+    const secret = (globalThis as { process?: { env?: Record<string, string | undefined> } })
+      .process?.env?.ADMIN_BACKFILL_SECRET;
+    if (!secret || args.secret !== secret) {
+      throw new Error("Invalid backfill secret");
+    }
+    const user = await ctx.db
+      .query("users")
+      .withIndex("email", (q) => q.eq("email", args.email))
+      .unique();
+    if (!user) {
+      throw new Error(`No signed-in user with email ${args.email} — sign in first`);
+    }
+    const counts: Record<UserTable, number> = { takes: 0, wrongLines: 0, correctLines: 0 };
+    for (const table of ["takes", "wrongLines", "correctLines"] as const) {
+      for await (const row of ctx.db.query(table)) {
+        if (row.userId === undefined) {
+          await ctx.db.patch(row._id, { userId: user._id });
+          counts[table] += 1;
+        }
+      }
+    }
+    return counts;
   },
 });

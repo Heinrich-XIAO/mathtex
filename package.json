@@ -11,6 +11,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@convex-dev/auth": "^0.0.96",
     "convex": "^1.46.0",
     "katex": "^0.18.7",
     "onnxruntime-web": "^1.30.0",

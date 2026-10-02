@@ -22,7 +22,7 @@ export const list = query({
         .withIndex("by_user_updated", (q) => q.eq("userId", userId))
         .order("desc")
         .collect()
-    ).map((f) => ({ id: f._id, name: f.name, updatedAt: f.updatedAt }));
+    ).map((f) => ({ id: f._id, name: f.name, updatedAt: f.updatedAt, context: f.context ?? "" }));
   },
 });
 
@@ -49,6 +49,18 @@ export const rename = mutation({
     // updatedAt tracks line activity, not renames — no bump, so a rename
     // doesn't jump the file to the top of the list.
     await ctx.db.patch(args.id, { name: args.name });
+  },
+});
+
+/** Set a file's background context. Like rename, this doesn't bump
+ *  updatedAt — editing context shouldn't reorder the file list. */
+export const setContext = mutation({
+  args: { id: v.id("files"), context: v.string() },
+  handler: async (ctx, args) => {
+    const userId = await requireUser(ctx);
+    const file = await ctx.db.get(args.id);
+    if (!file || file.userId !== userId) return;
+    await ctx.db.patch(args.id, { context: args.context.slice(0, 4000) });
   },
 });
 

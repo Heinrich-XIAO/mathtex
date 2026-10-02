@@ -68,6 +68,10 @@ export default defineSchema({
     name: v.string(),
     createdAt: v.number(),
     updatedAt: v.number(),
+    // Per-document background context for the LLM (problem statement copy,
+    // prior-step LaTeX, …). Optional: files created before this field read
+    // as "".
+    context: v.optional(v.string()),
   }).index("by_user_updated", ["userId", "updatedAt"]),
 
   lines: defineTable({

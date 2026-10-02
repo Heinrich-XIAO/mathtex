@@ -38,7 +38,7 @@ let tokenWaiters: (() => void)[] | null = null;
  *  render commit where AuthBridge's effect copies the token into this
  *  module client, and React runs child effects before parent effects —
  *  so the first workspace:list could fire unauthenticated, come back as
- *  an empty list, and boot would then mint a stray empty "Untitled"
+ *  an empty list, and boot would then mint a stray empty default-named
  *  instead of opening the user's files (observed in production). */
 export function waitForAuthToken(timeoutMs = 5000): Promise<boolean> {
   if (token) return Promise.resolve(true);

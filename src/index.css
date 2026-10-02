@@ -196,7 +196,13 @@ body {
   opacity: 1;
 }
 
-.line .latex {
+/* Base equation type: shared by committed lines and the live preview.
+ * Overflow hierarchy — wrap first (the .katex rule below), shrink-to-fit
+ * second (useAutoShrink in App.tsx lowers font-size to a floor of 0.55×),
+ * horizontal scroll last (overflow-x here). Fractions and roots are
+ * unbreakable, so long ones shrink instead of wrapping. */
+.line .latex,
+.pending-line .latex {
   overflow-x: auto;
   /* overflow-y computes to auto — a phantom ~7px v-scrollbar (KaTeX vlist
    * struts) and clipped fraction descenders. Give the clip edge headroom

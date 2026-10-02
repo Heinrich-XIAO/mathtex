@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -37,12 +38,14 @@ import {
   type FileMeta,
   type LineData,
   createFile,
+  defaultDocumentName,
   deleteFile,
   listFiles,
   loadLines,
   pushLines,
   renameFile,
   serializeLines,
+  setFileContext,
 } from "./lib/workspace";
 import { useConvexAuth, useAuthActions } from "@convex-dev/auth/react";
 import Landing from "./Landing";
@@ -82,14 +85,26 @@ export interface DismissedClip {
 }
 
 const LOW_CONFIDENCE = 0.7;
-// Background context the student gives at load (Khan Academy copy, LaTeX, …):
-// stored so it survives reloads and sent to the LLM with every call.
+// Background context the student gives per document (Khan Academy copy,
+// LaTeX, …): stored on the file in Convex (with a per-file localStorage
+// cache) and sent to the LLM with every call for that file.
 const CONTEXT_KEY = "mathtex.background-context";
+const contextKey = (fileId: string) => `${CONTEXT_KEY}.${fileId}`;
 const CONTEXT_MAX = 4000;
 // Typed correction captured in the wrong-mark dialog: one sentence, capped.
 const REASON_MAX = 200;
 
-function loadStoredContext(): string {
+function loadStoredContext(fileId: string | null): string {
+  if (!fileId) return "";
+  try {
+    return localStorage.getItem(contextKey(fileId)) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** The pre-per-document global value, adopted once into the open file. */
+function loadLegacyGlobalContext(): string {
   try {
     return localStorage.getItem(CONTEXT_KEY) ?? "";
   } catch {
@@ -97,9 +112,10 @@ function loadStoredContext(): string {
   }
 }
 
-function storeContext(v: string): void {
+function storeContext(fileId: string | null, v: string): void {
+  if (!fileId) return;
   try {
-    localStorage.setItem(CONTEXT_KEY, v);
+    localStorage.setItem(contextKey(fileId), v);
   } catch {
     /* private mode: context just won't persist */
   }
@@ -349,14 +365,74 @@ function Waveform({ level, active }: { level: { current: number }; active: boole
   );
 }
 
+// Fractions (\frac, \sqrt, delimiters) are unbreakable: KaTeX pre-chunks
+// breakable units (relations / binary ops) so .katex-display > .katex wraps
+// first via CSS, and only the still-overflowing remainder shrinks here.
+// Hierarchy: wrap (CSS) → shrink-to-fit (this hook) → horizontal scroll
+// (CSS overflow-x fallback). Shrinking is the last resort before scrolling.
+const LATEX_MIN_SCALE = 0.55;
+
+function useAutoShrink(dep: string) {
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    let raf = 0;
+    let disposed = false;
+    const fit = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        if (disposed || !el.isConnected) return;
+        el.style.fontSize = "";
+        el.style.overflowX = "hidden";
+        const basePx = parseFloat(getComputedStyle(el).fontSize) || 20.8;
+        const avail = el.clientWidth;
+        if (avail <= 0 || el.scrollWidth <= avail + 1) {
+          el.style.fontSize = "";
+          el.style.overflowX = "";
+          return;
+        }
+        const scale = Math.max(LATEX_MIN_SCALE, Math.min(1, avail / el.scrollWidth));
+        el.style.fontSize = `${(basePx * scale).toFixed(2)}px`;
+        // Narrower glyphs reflow the breakable chunks — verify once more.
+        if (el.scrollWidth > el.clientWidth + 1 && scale > LATEX_MIN_SCALE + 0.01) {
+          const scale2 = Math.max(LATEX_MIN_SCALE, scale * (el.clientWidth / el.scrollWidth));
+          el.style.fontSize = `${(basePx * scale2).toFixed(2)}px`;
+        }
+        // Still overflowing at the minimum: clear the override so the CSS
+        // overflow-x fallback (scroll) takes over.
+        el.style.overflowX = "";
+      });
+    };
+    fit();
+    const ro = new ResizeObserver(() => fit());
+    ro.observe(el);
+    const fontsReady = document.fonts?.ready;
+    if (fontsReady) {
+      void fontsReady
+        .then(() => {
+          if (!disposed) fit();
+        })
+        .catch(() => {});
+    }
+    return () => {
+      disposed = true;
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
+  }, [dep]);
+  return ref;
+}
+
 function PendingEquation({ latex }: { latex: string }) {
   const html = useMemo(
     () => katex.renderToString(latex, { displayMode: true, throwOnError: false, strict: false }),
     [latex],
   );
+  const fitRef = useAutoShrink(html);
   return (
     <div className="pending-line" aria-live="polite">
-      <div className="latex" dangerouslySetInnerHTML={{ __html: html }} />
+      <div ref={fitRef} className="latex" dangerouslySetInnerHTML={{ __html: html }} />
     </div>
   );
 }
@@ -430,6 +506,8 @@ function LineView({
     if (right) right.style.opacity = dx > 0 ? o.toFixed(2) : "0";
     if (left) left.style.opacity = dx < 0 ? o.toFixed(2) : "0";
   }, []);
+
+  const fitRef = useAutoShrink(html);
 
   // The content can change underneath (undo/redo/voice edit) — reset the row
   useEffect(() => {
@@ -519,7 +597,7 @@ function LineView({
       onPointerCancelCapture={onRowPointerEnd}
     >
       <div ref={bodyRef} className="line-body">
-        <div className="latex" dangerouslySetInnerHTML={{ __html: html }} />
+        <div ref={fitRef} className="latex" dangerouslySetInnerHTML={{ __html: html }} />
         {verdict === "wrong" && reason ? <div className="line-reason">“{reason}”</div> : null}
       </div>
       <button
@@ -783,10 +861,13 @@ export default function App() {
     dismissedRef.current = dismissed;
   }, [dismissed]);
   // Background context for the LLM: `source` is what gets sent, the dialog
-  // drafts an edit of it. Opens on every page load, prefilled from storage.
-  const [source, setSource] = useState<string>(() => loadStoredContext());
-  const [contextOpen, setContextOpen] = useState(true);
-  const [contextDraft, setContextDraft] = useState<string>(() => loadStoredContext());
+  // drafts an edit of it. Per-document: switching files swaps it; saves land
+  // on the active file (Convex + per-file local cache). The dialog opens
+  // only when a new document is created — never on startup — prefilled from
+  // the new file (empty).
+  const [source, setSource] = useState<string>("");
+  const [contextOpen, setContextOpen] = useState(false);
+  const [contextDraft, setContextDraft] = useState<string>("");
   const contextInputRef = useRef<HTMLTextAreaElement | null>(null);
   const liveCoverageRef = useRef(0); // ms of audio covered by the last completed poll
   const liveRequestRef = useRef<string>(""); // last poll's upstream LLM request
@@ -1208,18 +1289,57 @@ export default function App() {
     setStatus("idle");
   }, [stopLivePolls]);
 
-  // Background-context dialog: save persists (and trims) the draft, "no
-  // context" clears it entirely; reopening prefills with what's active.
+  // Point the context state at a file: server value wins, then the per-file
+  // offline cache, then the legacy pre-per-document global (adopted once into
+  // this file and consumed, so new files start empty).
+  const applyFileContext = useCallback((f: FileMeta) => {
+    let ctx = f.context;
+    if (ctx) {
+      storeContext(f.id, ctx);
+    } else {
+      ctx = loadStoredContext(f.id);
+      if (!ctx) {
+        const legacy = loadLegacyGlobalContext();
+        if (legacy) {
+          ctx = legacy;
+          storeContext(f.id, legacy);
+          try {
+            localStorage.removeItem(CONTEXT_KEY);
+          } catch {
+            /* private mode: legacy key just lingers */
+          }
+          void setFileContext(f.id, legacy);
+          setFiles((prev) => prev.map((x) => (x.id === f.id ? { ...x, context: legacy } : x)));
+        }
+      }
+    }
+    setSource(ctx);
+    setContextDraft(ctx);
+  }, []);
+
+  // Background-context dialog: save persists (and trims) the draft onto the
+  // active file, "no context" clears that file's context entirely; reopening
+  // prefills with what's active.
   const saveContext = useCallback(() => {
     const v = contextDraft.trim().slice(0, CONTEXT_MAX);
+    const fid = activeFileIdRef.current;
     setSource(v);
-    storeContext(v);
+    storeContext(fid, v);
+    if (fid) {
+      setFiles((prev) => prev.map((f) => (f.id === fid ? { ...f, context: v } : f)));
+      void setFileContext(fid, v);
+    }
     setContextOpen(false);
   }, [contextDraft]);
 
   const skipContext = useCallback(() => {
+    const fid = activeFileIdRef.current;
     setSource("");
-    storeContext("");
+    storeContext(fid, "");
+    if (fid) {
+      setFiles((prev) => prev.map((f) => (f.id === fid ? { ...f, context: "" } : f)));
+      void setFileContext(fid, "");
+    }
     setContextDraft("");
     setContextOpen(false);
   }, []);
@@ -1552,22 +1672,31 @@ export default function App() {
 
   // Workspace boot: open the newest file (creating a first one for new
   // users). bootRef holds the in-flight promise so StrictMode's double
-  // effect can't create two Untitled files.
+  // effect can't create two default-named files.
   const bootWorkspace = useCallback(() => {
     if (bootRef.current) return;
     bootRef.current = (async () => {
       setWsLoading(true);
       try {
         let list = await listFiles();
+        let isNew = false;
         if (list.length === 0) {
-          const id = await createFile("Untitled");
-          if (id) list = [{ id, name: "Untitled", updatedAt: Date.now() }];
+          const defaultName = defaultDocumentName();
+          const id = await createFile(defaultName);
+          if (id) {
+            list = [{ id, name: defaultName, updatedAt: Date.now(), context: "" }];
+            isNew = true;
+          }
         }
         setFiles(list);
         const first = list[0];
         if (first) {
           switchLockRef.current = true;
           setActiveFileId(first.id);
+          applyFileContext(first);
+          // First-ever boot created this document — prompt for its context.
+          // Returning users with existing files never see this on startup.
+          if (isNew) setContextOpen(true);
           const loaded = await loadLines(first.id);
           if (loaded) {
             setLines(loaded.map(toLine));
@@ -1582,7 +1711,7 @@ export default function App() {
         setWsLoading(false);
       }
     })();
-  }, [hydrateVerdicts]);
+  }, [hydrateVerdicts, applyFileContext]);
 
   useEffect(() => {
     if (isAuthenticated) {
@@ -1592,6 +1721,8 @@ export default function App() {
       bootRef.current = null;
       setFiles([]);
       setActiveFileId(null);
+      setSource("");
+      setContextDraft("");
       setLines([]);
       setVerdicts({});
       setReasons({});
@@ -1616,7 +1747,8 @@ export default function App() {
     });
   }, [wsLines, activeFileId, isAuthenticated]);
 
-  // Switch files: history resets (undo is per-file); verdicts and typed
+  // Switch files: history resets (undo is per-file) and the background
+  // context swaps to the new file's; verdicts and typed
   // reasons survive — they're keyed by globally-unique line ids.
   const switchFile = useCallback(async (f: FileMeta) => {
     if (f.id === activeFileIdRef.current) return;
@@ -1624,6 +1756,7 @@ export default function App() {
     setConfirmDeleteId(null);
     setRenamingId(null);
     setActiveFileId(f.id);
+    applyFileContext(f);
     setLines([]);
     setPast([]);
     setFuture([]);
@@ -1635,14 +1768,18 @@ export default function App() {
     }
     switchLockRef.current = false;
     if (loaded) hydrateVerdicts(loaded.map((l) => l.lineId));
-  }, [hydrateVerdicts]);
+  }, [hydrateVerdicts, applyFileContext]);
 
   const newFile = useCallback(async () => {
-    const id = await createFile("Untitled");
+    const defaultName = defaultDocumentName();
+    const id = await createFile(defaultName);
     if (!id) return;
-    const file: FileMeta = { id, name: "Untitled", updatedAt: Date.now() };
+    const file: FileMeta = { id, name: defaultName, updatedAt: Date.now(), context: "" };
     setFiles((prev) => [file, ...prev]);
     await switchFile(file);
+    // A new document starts context-free — prompt for it now.
+    setContextDraft("");
+    setContextOpen(true);
   }, [switchFile]);
 
   const beginRename = useCallback((f: FileMeta) => {
@@ -1655,7 +1792,7 @@ export default function App() {
     const id = renamingIdRef.current;
     setRenamingId(null);
     if (!id) return;
-    const name = renameDraft.trim().slice(0, 60) || "Untitled";
+    const name = renameDraft.trim().slice(0, 60) || defaultDocumentName();
     setFiles((prev) => prev.map((f) => (f.id === id ? { ...f, name } : f)));
     void renameFile(id, name);
   }, [renameDraft]);
@@ -1684,6 +1821,8 @@ export default function App() {
         } else {
           switchLockRef.current = true;
           setActiveFileId(null);
+          setSource("");
+          setContextDraft("");
           setLines([]);
           setPast([]);
           setFuture([]);
@@ -1985,6 +2124,12 @@ export default function App() {
         <div className="context-overlay" role="dialog" aria-modal="true" aria-labelledby="context-title">
           <div className="context-dialog">
             <h2 id="context-title">Any context for the AI?</h2>
+            {activeFileId && (
+              <p className="context-sub">
+                Saved to “{files.find((f) => f.id === activeFileId)?.name ?? "this file"}” only — each
+                file keeps its own context.
+              </p>
+            )}
             <textarea
               className="context-input"
               ref={contextInputRef}

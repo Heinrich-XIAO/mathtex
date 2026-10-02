@@ -718,6 +718,17 @@ body {
   filter: brightness(1.1);
 }
 
+.context-primary.danger {
+  background: var(--red);
+  color: #1a0e0e;
+}
+
+.context-sub {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 /* Footer ghost that reopens the dialog; brighter when context is active */
 .ghost.has-context {
   opacity: 0.7;
@@ -876,11 +887,6 @@ body {
 
 .file-action.danger:hover {
   color: var(--red);
-}
-
-.file-action.confirm {
-  color: var(--red);
-  padding: 4px 7px;
 }
 
 .file-new {

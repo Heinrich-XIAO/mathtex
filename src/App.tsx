@@ -1021,7 +1021,7 @@ export default function App() {
       ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") ||
       ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "z");
     const onKeyDown = (e: KeyboardEvent) => {
-      if (contextOpen || reasonTargetId !== null) return;
+      if (contextOpen || reasonTargetId !== null || confirmDeleteId !== null) return;
       const t = e.target as HTMLElement | null;
       const typing = !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA");
       if (isUndo(e)) {
@@ -1041,7 +1041,7 @@ export default function App() {
       void start();
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      if (contextOpen || reasonTargetId !== null) return;
+      if (contextOpen || reasonTargetId !== null || confirmDeleteId !== null) return;
       if (!isSpace(e)) return;
       void finish();
     };
@@ -1051,11 +1051,12 @@ export default function App() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [contextOpen, reasonTargetId, start, finish, undo, redo]);
+  }, [contextOpen, reasonTargetId, confirmDeleteId, start, finish, undo, redo]);
 
   const listening = status === "listening";
   const thinking = status === "thinking";
   const reasonLine = reasonTargetId ? lines.find((l) => l.id === reasonTargetId) : undefined;
+  const deleteTarget = confirmDeleteId ? files.find((f) => f.id === confirmDeleteId) : undefined;
   const { mode: installMode, install, dismiss: dismissInstall } = useInstall();
 
   const { isLoading, isAuthenticated } = useConvexAuth();
@@ -1182,38 +1183,39 @@ export default function App() {
     void renameFile(id, name);
   }, [renameDraft]);
 
-  // Delete file: two taps (the ✕ becomes "Sure?" for 2.5s), no native confirm.
-  const removeFileAction = useCallback(
-    (f: FileMeta) => {
-      if (confirmDeleteId !== f.id) {
-        setConfirmDeleteId(f.id);
-        window.setTimeout(() => {
-          setConfirmDeleteId((cur) => (cur === f.id ? null : cur));
-        }, 2500);
-        return;
-      }
-      setConfirmDeleteId(null);
-      void (async () => {
-        await deleteFile(f.id);
-        const rest = files.filter((x) => x.id !== f.id);
-        setFiles(rest);
-        if (f.id === activeFileIdRef.current) {
-          if (rest[0]) {
-            await switchFile(rest[0]);
-          } else {
-            switchLockRef.current = true;
-            setActiveFileId(null);
-            setLines([]);
-            setPast([]);
-            setFuture([]);
-            lastSyncRef.current = "[]";
-            switchLockRef.current = false;
-          }
+  // Delete file: ✕ opens a confirmation dialog (same overlay style as the
+  // background-context dialog); Delete confirms, Cancel/Esc/overlay dismisses.
+  const requestDelete = useCallback((f: FileMeta) => {
+    setConfirmDeleteId(f.id);
+  }, []);
+
+  const cancelDelete = useCallback(() => {
+    setConfirmDeleteId(null);
+  }, []);
+
+  const confirmDelete = useCallback(() => {
+    const id = confirmDeleteId;
+    if (!id) return;
+    setConfirmDeleteId(null);
+    void (async () => {
+      await deleteFile(id);
+      const rest = files.filter((x) => x.id !== id);
+      setFiles(rest);
+      if (id === activeFileIdRef.current) {
+        if (rest[0]) {
+          await switchFile(rest[0]);
+        } else {
+          switchLockRef.current = true;
+          setActiveFileId(null);
+          setLines([]);
+          setPast([]);
+          setFuture([]);
+          lastSyncRef.current = "[]";
+          switchLockRef.current = false;
         }
-      })();
-    },
-    [confirmDeleteId, files, switchFile],
-  );
+      }
+    })();
+  }, [confirmDeleteId, files, switchFile]);
 
   // wsLoading only gates the signed-in path — an unauthenticated visitor
   // must reach the Landing page, not wait on a workspace that never boots.
@@ -1265,12 +1267,12 @@ export default function App() {
                         <PencilGlyph />
                       </button>
                       <button
-                        className={`file-action danger${confirmDeleteId === f.id ? " confirm" : ""}`}
-                        onClick={() => removeFileAction(f)}
-                        title={confirmDeleteId === f.id ? "Click again to delete" : "Delete file"}
+                        className="file-action danger"
+                        onClick={() => requestDelete(f)}
+                        title="Delete file"
                         aria-label="Delete file"
                       >
-                        {confirmDeleteId === f.id ? "Sure?" : <XGlyph size={11} />}
+                        <XGlyph size={11} />
                       </button>
                     </>
                   )}
@@ -1465,6 +1467,31 @@ export default function App() {
           <button className="install-hint-dismiss" onClick={dismissInstall} title="Dismiss">
             ×
           </button>
+        </div>
+      )}
+      {deleteTarget && (
+        <div
+          className="context-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-title"
+          onClick={cancelDelete}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") cancelDelete();
+          }}
+        >
+          <div className="context-dialog" onClick={(e) => e.stopPropagation()}>
+            <h2 id="delete-title">Delete “{deleteTarget.name}”?</h2>
+            <p className="context-sub">This will permanently delete the file and its lines.</p>
+            <div className="context-actions">
+              <button className="context-secondary" onClick={cancelDelete} autoFocus>
+                Cancel
+              </button>
+              <button className="context-primary danger" onClick={confirmDelete}>
+                Delete
+              </button>
+            </div>
+          </div>
         </div>
       )}
       {contextOpen && (

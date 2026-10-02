@@ -20,10 +20,13 @@ import {
   type JsonHealth,
 } from "./lib/api";
 import {
+  confirmVadDismiss,
+  loadVerdicts,
   markCorrect,
   markWrong,
   reportVadMiss,
   setWrongReason,
+  unconfirmVadDismiss,
   unmarkCorrect,
   unmarkWrong,
   unreportVadMiss,
@@ -54,6 +57,28 @@ export interface Line {
   confidence: number;
   uncertain: boolean;
   note: string;
+}
+
+/** A clip the VAD/energy gate dismissed, kept for a possible missed-speech
+ *  verdict. `verdict` null = awaiting judgment; "miss" = incorrectly
+ *  dismissed (was speech — report + parse); "correct" = correctly dismissed
+ *  (really noise — stored in vadHits). `wav`/`final` are retained so a miss
+ *  verdict can actually parse the clip instead of just logging it. */
+export interface DismissedClip {
+  takeId: string;
+  dismissReason: string;
+  vadSpeechMs?: number;
+  vadMaxProb?: number;
+  vadMeanProb?: number;
+  transcript: string;
+  asr: string;
+  verdict: null | "miss" | "correct";
+  parsing: boolean;
+  wav?: ArrayBuffer;
+  final?: DictationResult;
+  finalRequest: string;
+  finalHealth: JsonHealth;
+  target?: number;
 }
 
 const LOW_CONFIDENCE = 0.7;
@@ -532,6 +557,194 @@ function LineView({
   );
 }
 
+/** Dismissed-as-noise banner with the same Tinder swipe as lines: right =
+ *  correctly dismissed (really noise), left = incorrectly dismissed (was
+ *  speech — reports the miss and parses the clip). Buttons mirror the
+ *  swipes for desktop; × just hides without storing a verdict. */
+function DismissBanner({
+  clip,
+  swipeEnabled,
+  onCorrect,
+  onMiss,
+  onUndo,
+  onHide,
+}: {
+  clip: DismissedClip;
+  swipeEnabled: boolean;
+  onCorrect: () => void;
+  onMiss: () => void;
+  onUndo: () => void;
+  onHide: () => void;
+}) {
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const stampRightRef = useRef<HTMLDivElement>(null);
+  const stampLeftRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef({
+    id: -1,
+    startX: 0,
+    startY: 0,
+    active: false,
+    lastX: 0,
+    lastT: 0,
+    vx: 0,
+  });
+  const suppressClickRef = useRef(false);
+
+  const setBody = useCallback((x: number, animated: boolean) => {
+    const el = bodyRef.current;
+    if (!el) return;
+    el.style.transition = animated ? "transform 220ms cubic-bezier(0.2, 0.7, 0.3, 1)" : "none";
+    el.style.transform = `translateX(${x}px)`;
+  }, []);
+
+  const setStamps = useCallback((dx: number) => {
+    const o = Math.max(0, Math.min(1, (Math.abs(dx) - 28) / 80));
+    const right = stampRightRef.current;
+    const left = stampLeftRef.current;
+    if (right) right.style.opacity = dx > 0 ? o.toFixed(2) : "0";
+    if (left) left.style.opacity = dx < 0 ? o.toFixed(2) : "0";
+  }, []);
+
+  useEffect(() => {
+    setBody(0, false);
+    setStamps(0);
+  }, [clip.takeId, setBody, setStamps]);
+
+  const heard = (clip.transcript || clip.asr).slice(0, 80);
+
+  return (
+    <div
+      className="dismiss-banner"
+      role="status"
+      onPointerDownCapture={(e) => {
+        const d = dragRef.current;
+        d.id = e.pointerId;
+        d.startX = e.clientX;
+        d.startY = e.clientY;
+        d.active = false;
+        d.lastX = e.clientX;
+        d.lastT = e.timeStamp;
+        d.vx = 0;
+        suppressClickRef.current = false;
+      }}
+      onPointerMoveCapture={(e) => {
+        const d = dragRef.current;
+        if (d.id === -1 || e.pointerId !== d.id) return;
+        const dx = e.clientX - d.startX;
+        const dy = e.clientY - d.startY;
+        if (!d.active) {
+          if (Math.abs(dx) < 10 || Math.abs(dx) <= Math.abs(dy)) return;
+          if (!swipeEnabled) return;
+          d.active = true;
+          e.currentTarget.setPointerCapture(e.pointerId);
+        }
+        const dt = e.timeStamp - d.lastT;
+        if (dt > 0) d.vx = (e.clientX - d.lastX) / dt;
+        d.lastX = e.clientX;
+        d.lastT = e.timeStamp;
+        const next = Math.max(-96, Math.min(96, dx));
+        setBody(next, false);
+        setStamps(next);
+      }}
+      onPointerUpCapture={(e) => {
+        const d = dragRef.current;
+        if (d.id === -1 || e.pointerId !== d.id) return;
+        d.id = -1;
+        if (!d.active) return;
+        d.active = false;
+        suppressClickRef.current = true;
+        const dx = e.clientX - d.startX;
+        const commit = Math.abs(dx) >= SWIPE_COMMIT || Math.abs(d.vx) >= FLICK_VX;
+        setBody(0, true);
+        setStamps(0);
+        if (commit) {
+          if (dx >= 0) onCorrect();
+          else onMiss();
+        }
+      }}
+      onPointerCancelCapture={() => {
+        dragRef.current.id = -1;
+        dragRef.current.active = false;
+        setBody(0, true);
+        setStamps(0);
+      }}
+    >
+      <div ref={bodyRef} className="dismiss-banner-body">
+        {clip.parsing ? (
+          <span>Parsing dismissed clip…</span>
+        ) : clip.verdict === "miss" ? (
+          <>
+            <span>Reported as missed speech — parsing…</span>
+            <button className="dismiss" onClick={onHide} aria-label="Dismiss">
+              ×
+            </button>
+          </>
+        ) : clip.verdict === "correct" ? (
+          <>
+            <span>Marked correctly dismissed.</span>
+            <button className="dismiss-action" onClick={onUndo}>
+              Undo
+            </button>
+            <button className="dismiss" onClick={onHide} aria-label="Dismiss">
+              ×
+            </button>
+          </>
+        ) : (
+          <>
+            <span>
+              Dismissed as bg noise
+              {clip.vadSpeechMs !== undefined ? ` · ${clip.vadSpeechMs}ms` : ""}
+              {heard ? ` — “${heard}”` : ""}
+            </span>
+            <button
+              className="dismiss-action primary"
+              onClick={(e) => {
+                if (suppressClickRef.current) {
+                  suppressClickRef.current = false;
+                  return;
+                }
+                e.stopPropagation();
+                onMiss();
+              }}
+              title="Report as real speech and parse it"
+            >
+              That was speech
+            </button>
+            <button
+              className="dismiss-action"
+              onClick={(e) => {
+                if (suppressClickRef.current) {
+                  suppressClickRef.current = false;
+                  return;
+                }
+                e.stopPropagation();
+                onCorrect();
+              }}
+              title="Confirm this really was noise"
+            >
+              Correct
+            </button>
+            <button
+              className="dismiss"
+              onClick={onHide}
+              aria-label="Dismiss without saving"
+              title="Dismiss without saving"
+            >
+              ×
+            </button>
+          </>
+        )}
+      </div>
+      <div ref={stampRightRef} className="stamp stamp-right" aria-hidden>
+        Correct
+      </div>
+      <div ref={stampLeftRef} className="stamp stamp-left" aria-hidden>
+        Speech
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState("");
@@ -562,15 +775,13 @@ export default function App() {
   const [provisionalFrom, setProvisionalFrom] = useState<number | null>(null);
   // Latest dismissed clip (VAD/energy gate): kept so a false negative ("I
   // spoke, it heard nothing") can be reported as real speech. Audio is
-  // already uploaded as a dismissed take; reporting adds a vadMisses row.
-  const [dismissed, setDismissed] = useState<{
-    takeId: string;
-    dismissReason: string;
-    vadSpeechMs?: number;
-    transcript: string;
-    asr: string;
-    reported: boolean;
-  } | null>(null);
+  // already uploaded as a dismissed take; a miss verdict adds a vadMisses
+  // row and parses the clip, a correct verdict adds a vadHits row.
+  const [dismissed, setDismissed] = useState<DismissedClip | null>(null);
+  const dismissedRef = useRef<DismissedClip | null>(null);
+  useEffect(() => {
+    dismissedRef.current = dismissed;
+  }, [dismissed]);
   // Background context for the LLM: `source` is what gets sent, the dialog
   // drafts an edit of it. Opens on every page load, prefilled from storage.
   const [source, setSource] = useState<string>(() => loadStoredContext());
@@ -757,10 +968,21 @@ export default function App() {
             setDismissed({
               takeId: blankTakeId,
               dismissReason: "blank",
-              ...(blankSpeech.ok ? { vadSpeechMs: blankSpeech.speechMs } : {}),
+              ...(blankSpeech.ok
+                ? {
+                    vadSpeechMs: blankSpeech.speechMs,
+                    vadMaxProb: blankSpeech.maxProb,
+                    vadMeanProb: blankSpeech.meanProb,
+                  }
+                : {}),
               transcript: "",
               asr: blankAsr,
-              reported: false,
+              verdict: null,
+              parsing: false,
+              wav: wavAndPcmBlank.wav.slice(0),
+              finalRequest: "",
+              finalHealth: "failed",
+              target,
             });
           } catch {
             // Conversion failed: still offer the report (metadata-only).
@@ -769,7 +991,11 @@ export default function App() {
               dismissReason: "blank",
               transcript: "",
               asr: blankAsr,
-              reported: false,
+              verdict: null,
+              parsing: false,
+              finalRequest: "",
+              finalHealth: "failed",
+              target,
             });
           }
         }
@@ -897,10 +1123,22 @@ export default function App() {
           setDismissed({
             takeId,
             dismissReason: "vad-guard",
-            ...(speech.ok ? { vadSpeechMs: speech.speechMs } : {}),
+            ...(speech.ok
+              ? {
+                  vadSpeechMs: speech.speechMs,
+                  vadMaxProb: speech.maxProb,
+                  vadMeanProb: speech.meanProb,
+                }
+              : {}),
             transcript: final.transcript,
             asr: asrRef.current,
-            reported: false,
+            verdict: null,
+            parsing: false,
+            wav: wavAndPcm.wav.slice(0),
+            final,
+            finalRequest,
+            finalHealth,
+            target,
           });
           setProvisionalFrom(null);
           setTargetIndex(undefined);
@@ -1029,32 +1267,124 @@ export default function App() {
     setReasonTargetId(null);
   }, []);
 
-  // Missed-speech report: the dismissed clip WAS real speech. The audio is
-  // already stored as a dismissed take; this adds the vadMisses verdict row.
-  const reportMissed = useCallback(() => {
+  // Dismissal verdicts, mirroring the line swipes: right = correctly
+  // dismissed (really noise → vadHits row), left = incorrectly dismissed
+  // (was speech → vadMisses row + actually parse the clip).
+  function dismissedMeta(d: DismissedClip) {
+    return {
+      transcript: d.transcript,
+      ...(d.asr ? { asr: d.asr } : {}),
+      ...(d.vadSpeechMs !== undefined ? { vadSpeechMs: d.vadSpeechMs } : {}),
+      ...(d.vadMaxProb !== undefined ? { vadMaxProb: d.vadMaxProb } : {}),
+      ...(d.vadMeanProb !== undefined ? { vadMeanProb: d.vadMeanProb } : {}),
+      dismissReason: d.dismissReason,
+    };
+  }
+
+  const confirmDismissed = useCallback(() => {
     setDismissed((d) => {
-      if (!d || d.reported) return d;
-      void reportVadMiss(d.takeId, {
-        transcript: d.transcript,
-        ...(d.asr ? { asr: d.asr } : {}),
-        ...(d.vadSpeechMs !== undefined ? { vadSpeechMs: d.vadSpeechMs } : {}),
-        dismissReason: d.dismissReason,
-      });
-      return { ...d, reported: true };
+      if (!d || d.verdict !== null || d.parsing) return d;
+      void confirmVadDismiss(d.takeId, dismissedMeta(d));
+      return { ...d, verdict: "correct" as const };
     });
   }, []);
 
-  const undoMissedReport = useCallback(() => {
+  const undoDismissedVerdict = useCallback(() => {
     setDismissed((d) => {
-      if (!d || !d.reported) return d;
-      void unreportVadMiss(d.takeId);
-      return { ...d, reported: false };
+      if (!d || d.verdict === null || d.parsing) return d;
+      if (d.verdict === "correct") void unconfirmVadDismiss(d.takeId);
+      else void unreportVadMiss(d.takeId);
+      return { ...d, verdict: null };
     });
   }, []);
 
+  // × hides without storing — the dismissed take row keeps the audio, just
+  // with no verdict attached.
   const hideDismissed = useCallback(() => {
     setDismissed(null);
   }, []);
+
+  // Swipe/button left on the banner: the dismissal was wrong, so report the
+  // miss AND parse the clip — applying the discarded result, or running the
+  // model on the retained audio when there is none (blank gate).
+  const parseDismissed = useCallback(async () => {
+    const d = dismissedRef.current;
+    if (!d || d.verdict !== null || d.parsing) return;
+    if (statusRef.current !== "idle") return;
+    void reportVadMiss(d.takeId, dismissedMeta(d));
+    setDismissed({ ...d, verdict: "miss" as const, parsing: true });
+    setStatus("thinking");
+    try {
+      const target = d.target;
+      if (d.final) {
+        // VAD-guard case: the model already heard the clip — the user's
+        // override bypasses the confidence guard and lands it.
+        const res = d.final;
+        const before = linesRef.current;
+        setPast((p) => [...p.slice(-49), before]);
+        setFuture([]);
+        setLines(applyResult(before, res, target, d.takeId));
+        if (d.wav) {
+          void uploadTake(d.takeId, d.wav, {
+            latex: res.lines.join("\n"),
+            transcript: res.transcript,
+            note: res.note,
+            confidence: res.confidence,
+            uncertain: res.uncertain,
+            ...(d.asr ? { asr: d.asr } : {}),
+            jsonHealth: d.finalHealth,
+            dismissed: false,
+            dismissReason: d.dismissReason,
+            ...(d.vadSpeechMs !== undefined ? { vadSpeechMs: d.vadSpeechMs } : {}),
+            ...(d.vadMaxProb !== undefined ? { vadMaxProb: d.vadMaxProb } : {}),
+            ...(d.vadMeanProb !== undefined ? { vadMeanProb: d.vadMeanProb } : {}),
+          }, d.finalRequest);
+        }
+      } else if (d.wav) {
+        // Blank-gate case: never sent to the model — run it now against the
+        // current file context.
+        const ctxNow: CallContext = {
+          lines: linesRef.current.map((l) => ({ latex: l.latex })),
+          targetIndex: target,
+          source,
+        };
+        const { result, request, jsonHealth } = await dictate(d.wav, ctxNow, {
+          asr: d.asr,
+        });
+        const before = linesRef.current;
+        setPast((p) => [...p.slice(-49), before]);
+        setFuture([]);
+        setLines(applyResult(before, result, target, d.takeId));
+        void uploadTake(d.takeId, d.wav, {
+          latex: result.lines.join("\n"),
+          transcript: result.transcript,
+          note: result.note,
+          confidence: result.confidence,
+          uncertain: result.uncertain,
+          ...(d.asr ? { asr: d.asr } : {}),
+          jsonHealth,
+          dismissed: false,
+          dismissReason: d.dismissReason,
+          ...(d.vadSpeechMs !== undefined ? { vadSpeechMs: d.vadSpeechMs } : {}),
+          ...(d.vadMaxProb !== undefined ? { vadMaxProb: d.vadMaxProb } : {}),
+          ...(d.vadMeanProb !== undefined ? { vadMeanProb: d.vadMeanProb } : {}),
+        }, request);
+      } else {
+        throw new Error("no audio retained for this clip");
+      }
+      setTargetIndex(undefined);
+      setLiveResult(null);
+      setProvisionalFrom(null);
+      setDismissed(null);
+      setStatus("idle");
+    } catch (e) {
+      setDismissed((prev) =>
+        prev && prev.takeId === d.takeId ? { ...prev, verdict: null, parsing: false } : prev,
+      );
+      setStatus("error");
+      setError(`Parse failed: ${(e as Error).message || "Something went wrong"}`);
+    }
+  }, [source]);
 
   const undo = useCallback(() => {
     setProvisionalFrom(null);
@@ -1193,6 +1523,33 @@ export default function App() {
     [lines],
   );
 
+  // Verdicts live in Convex (wrongLines/correctLines) but stamps live in
+  // React state — repaint them after every lines load, or a reload wipes
+  // the colors while the rows survive. Merge-only: a swipe that lands
+  // while the fetch is in flight keeps winning over the stale read.
+  const hydrateVerdicts = useCallback((lineIds: string[]) => {
+    if (lineIds.length === 0) return;
+    void loadVerdicts(lineIds).then((vs) => {
+      if (vs.length === 0) return;
+      setVerdicts((prev) => {
+        const next = { ...prev };
+        for (const v of vs) {
+          if (!(v.lineId in prev)) next[v.lineId] = v.verdict;
+        }
+        return next;
+      });
+      setReasons((prev) => {
+        const next = { ...prev };
+        for (const v of vs) {
+          if (v.verdict === "wrong" && v.reason && !(v.lineId in prev)) {
+            next[v.lineId] = v.reason;
+          }
+        }
+        return next;
+      });
+    });
+  }, []);
+
   // Workspace boot: open the newest file (creating a first one for new
   // users). bootRef holds the in-flight promise so StrictMode's double
   // effect can't create two Untitled files.
@@ -1217,6 +1574,7 @@ export default function App() {
             lastSyncRef.current = serializeLines(loaded);
           }
           switchLockRef.current = false;
+          if (loaded) hydrateVerdicts(loaded.map((l) => l.lineId));
         }
       } catch (e) {
         console.warn("[workspace] boot failed", e);
@@ -1224,7 +1582,7 @@ export default function App() {
         setWsLoading(false);
       }
     })();
-  }, []);
+  }, [hydrateVerdicts]);
 
   useEffect(() => {
     if (isAuthenticated) {
@@ -1237,6 +1595,7 @@ export default function App() {
       setLines([]);
       setVerdicts({});
       setReasons({});
+      setDismissed(null);
       setPast([]);
       setFuture([]);
       setWsLoading(true);
@@ -1275,7 +1634,8 @@ export default function App() {
       lastSyncRef.current = serializeLines(loaded);
     }
     switchLockRef.current = false;
-  }, []);
+    if (loaded) hydrateVerdicts(loaded.map((l) => l.lineId));
+  }, [hydrateVerdicts]);
 
   const newFile = useCallback(async () => {
     const id = await createFile("Untitled");
@@ -1417,43 +1777,15 @@ export default function App() {
             </button>
           </div>
         )}
-        {dismissed && !listening && !thinking && (
-          <div className="dismiss-banner" role="status">
-            {dismissed.reported ? (
-              <>
-                <span>Thanks — reported as missed speech.</span>
-                <button className="dismiss-action" onClick={undoMissedReport}>
-                  Undo
-                </button>
-                <button className="dismiss" onClick={hideDismissed} aria-label="Dismiss">
-                  ×
-                </button>
-              </>
-            ) : (
-              <>
-                <span>
-                  Dismissed as background noise
-                  {dismissed.vadSpeechMs !== undefined
-                    ? ` (VAD speech ${dismissed.vadSpeechMs}ms)`
-                    : ""}
-                  {dismissed.transcript || dismissed.asr
-                    ? ` — heard “${(dismissed.transcript || dismissed.asr).slice(0, 80)}”`
-                    : ""}
-                  . Was that you speaking?
-                </span>
-                <button
-                  className="dismiss-action primary"
-                  onClick={reportMissed}
-                  title="Report this clip as real speech"
-                >
-                  That was speech
-                </button>
-                <button className="dismiss" onClick={hideDismissed} aria-label="Dismiss">
-                  ×
-                </button>
-              </>
-            )}
-          </div>
+        {dismissed && !listening && (!thinking || dismissed.parsing) && (
+          <DismissBanner
+            clip={dismissed}
+            swipeEnabled={!dismissed.parsing && dismissed.verdict === null}
+            onCorrect={confirmDismissed}
+            onMiss={() => void parseDismissed()}
+            onUndo={undoDismissedVerdict}
+            onHide={hideDismissed}
+          />
         )}
 
         {lines.length === 0 ? (

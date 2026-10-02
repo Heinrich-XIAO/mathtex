@@ -291,18 +291,29 @@ body {
   cursor: pointer;
 }
 
-/* Dismissed-as-noise banner: the VAD/energy gate threw a clip away. Offers
-   a one-tap missed-speech report so false negatives stay recoverable. */
+/* Dismissed-as-noise banner: the VAD/energy gate threw a clip away. Same
+   Tinder swipe as lines — right = correctly dismissed, left = was speech
+   (reports the miss and parses the clip). */
 .dismiss-banner {
+  position: relative;
+  overflow: hidden;
   background: color-mix(in srgb, var(--amber) 12%, var(--card));
   border: 1px solid color-mix(in srgb, var(--amber) 35%, transparent);
   color: var(--text);
   border-radius: 10px;
-  padding: 10px 14px;
   font-size: 0.85rem;
+  touch-action: pan-y;
+}
+
+.dismiss-banner-body {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 12px;
+  padding: 10px 14px;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .dismiss-banner .dismiss {
@@ -339,12 +350,15 @@ body {
   color: #1a1408;
 }
 
-.dismiss-banner .dismiss + .dismiss-action,
-.dismiss-banner span + .dismiss-action {
+.dismiss-banner-body span + .dismiss-action {
   margin-left: auto;
 }
 
-.dismiss-banner .dismiss-action + .dismiss {
+.dismiss-banner-body .dismiss-action + .dismiss {
+  margin-left: 0;
+}
+
+.dismiss-banner-body .dismiss-action + .dismiss-action {
   margin-left: 0;
 }
 

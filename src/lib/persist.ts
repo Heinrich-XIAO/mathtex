@@ -113,6 +113,39 @@ export async function unreportVadMiss(takeId: string): Promise<void> {
   }
 }
 
+/** Confirm a dismissal was correct (true negative: really just noise).
+ *  Fire-and-forget. Idempotent per takeId, stored in vadHits — separate
+ *  from vadMisses the way correctLines is separate from wrongLines. */
+export async function confirmVadDismiss(takeId: string, meta: VadMissMeta): Promise<void> {
+  const c = getClient();
+  if (!c) return;
+  try {
+    await c.mutation(api.takes.confirmVadDismiss, {
+      takeId,
+      transcript: meta.transcript,
+      ...(meta.asr !== undefined ? { asr: meta.asr } : {}),
+      ...(meta.vadSpeechMs !== undefined ? { vadSpeechMs: meta.vadSpeechMs } : {}),
+      ...(meta.vadMaxProb !== undefined ? { vadMaxProb: meta.vadMaxProb } : {}),
+      ...(meta.vadMeanProb !== undefined ? { vadMeanProb: meta.vadMeanProb } : {}),
+      ...(meta.dismissReason !== undefined ? { dismissReason: meta.dismissReason } : {}),
+      reportedAt: Date.now(),
+    });
+  } catch (e) {
+    console.warn("[convex] confirmVadDismiss failed", e);
+  }
+}
+
+/** Retract a correct-dismissal confirmation. Fire-and-forget. */
+export async function unconfirmVadDismiss(takeId: string): Promise<void> {
+  const c = getClient();
+  if (!c) return;
+  try {
+    await c.mutation(api.takes.unconfirmVadDismiss, { takeId });
+  } catch (e) {
+    console.warn("[convex] unconfirmVadDismiss failed", e);
+  }
+}
+
 /** Flag a line as wrong in the database. Fire-and-forget. */
 export async function markWrong(
   lineId: string,
@@ -197,5 +230,24 @@ export async function unmarkCorrect(lineId: string): Promise<void> {
     await c.mutation(api.takes.unmarkCorrect, { lineId });
   } catch (e) {
     console.warn("[convex] unmarkCorrect failed", e);
+  }
+}
+
+export interface VerdictData {
+  lineId: string;
+  verdict: "wrong" | "correct";
+  reason?: string;
+}
+
+/** Load verdicts for a set of lines (repaint stamps after reload).
+ *  Returns [] on failure — the caller keeps whatever it had. */
+export async function loadVerdicts(lineIds: string[]): Promise<VerdictData[]> {
+  const c = getClient();
+  if (!c || lineIds.length === 0) return [];
+  try {
+    return await c.query(api.takes.getVerdicts, { lineIds });
+  } catch (e) {
+    console.warn("[convex] loadVerdicts failed", e);
+    return [];
   }
 }

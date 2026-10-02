@@ -145,4 +145,20 @@ export default defineSchema({
     reportedAt: v.number(),
     latencyMs: v.optional(v.number()),
   }).index("by_takeId", ["takeId"]),
+
+  // Correct-dismissal confirmations: "yes, that really was just noise".
+  // Same shape as vadMisses, separate table — mirrors how correctLines and
+  // wrongLines are kept apart for transcribed lines.
+  vadHits: defineTable({
+    userId: v.optional(v.id("users")),
+    takeId: v.string(),
+    transcript: v.string(),
+    asr: v.optional(v.string()),
+    vadSpeechMs: v.optional(v.number()),
+    vadMaxProb: v.optional(v.number()),
+    vadMeanProb: v.optional(v.number()),
+    dismissReason: v.optional(v.string()),
+    reportedAt: v.number(),
+    latencyMs: v.optional(v.number()),
+  }).index("by_takeId", ["takeId"]),
 });

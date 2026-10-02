@@ -4,7 +4,7 @@ import type { Id } from "./_generated/dataModel";
 import { mutation, query } from "./_generated/server";
 import type { MutationCtx } from "./_generated/server";
 
-type UserTable = "takes" | "wrongLines" | "correctLines" | "vadMisses";
+type UserTable = "takes" | "wrongLines" | "correctLines" | "vadMisses" | "vadHits";
 
 /** Every write goes through here: no identity, no write. */
 async function requireUser(ctx: MutationCtx): Promise<Id<"users">> {
@@ -238,6 +238,50 @@ export const unmarkCorrect = mutation({
   },
 });
 
+/** Fetch verdicts for a set of lines, so reloads repaint the stamps.
+ *  Returns only rows owned by the caller; when both sides exist (race),
+ *  the most recently marked one wins. */
+export const getVerdicts = query({
+  args: { lineIds: v.array(v.string()) },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) return [];
+    const out: { lineId: string; verdict: "wrong" | "correct"; reason?: string }[] = [];
+    for (const lineId of args.lineIds.slice(0, 500)) {
+      const wrong = await ctx.db
+        .query("wrongLines")
+        .withIndex("by_lineId", (q) => q.eq("lineId", lineId))
+        .unique();
+      const correct = await ctx.db
+        .query("correctLines")
+        .withIndex("by_lineId", (q) => q.eq("lineId", lineId))
+        .unique();
+      const ownWrong = wrong && wrong.userId === userId ? wrong : null;
+      const ownCorrect = correct && correct.userId === userId ? correct : null;
+      if (ownWrong && ownCorrect) {
+        if (ownWrong.markedAt >= ownCorrect.markedAt) {
+          out.push(
+            ownWrong.reason !== undefined
+              ? { lineId, verdict: "wrong" as const, reason: ownWrong.reason }
+              : { lineId, verdict: "wrong" as const },
+          );
+        } else {
+          out.push({ lineId, verdict: "correct" as const });
+        }
+      } else if (ownWrong) {
+        out.push(
+          ownWrong.reason !== undefined
+            ? { lineId, verdict: "wrong" as const, reason: ownWrong.reason }
+            : { lineId, verdict: "wrong" as const },
+        );
+      } else if (ownCorrect) {
+        out.push({ lineId, verdict: "correct" as const });
+      }
+    }
+    return out;
+  },
+});
+
 /** Report a dismissed clip as real speech (VAD false negative).
  *  Idempotent per takeId: the audio evidence lives on the matching takes
  *  row (dismissed=true). */
@@ -281,6 +325,49 @@ export const unreportVadMiss = mutation({
   },
 });
 
+/** Confirm a dismissal was correct ("yes, that really was just noise").
+ *  Idempotent per takeId; mirrors reportVadMiss into the separate vadHits
+ *  table, like correctLines mirrors wrongLines. */
+export const confirmVadDismiss = mutation({
+  args: {
+    takeId: v.string(),
+    transcript: v.string(),
+    asr: v.optional(v.string()),
+    vadSpeechMs: v.optional(v.number()),
+    vadMaxProb: v.optional(v.number()),
+    vadMeanProb: v.optional(v.number()),
+    dismissReason: v.optional(v.string()),
+    reportedAt: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const userId = await requireUser(ctx);
+    const existing = await ctx.db
+      .query("vadHits")
+      .withIndex("by_takeId", (q) => q.eq("takeId", args.takeId))
+      .unique();
+    if (existing) return;
+    const latencyMs = await verdictLatency(ctx, userId, args.takeId, args.reportedAt);
+    await ctx.db.insert("vadHits", {
+      ...args,
+      ...(latencyMs !== undefined ? { latencyMs } : {}),
+      userId,
+    });
+  },
+});
+
+/** Retract a correct-dismissal confirmation. Removes the record entirely. */
+export const unconfirmVadDismiss = mutation({
+  args: { takeId: v.string() },
+  handler: async (ctx, args) => {
+    const userId = await requireUser(ctx);
+    const existing = await ctx.db
+      .query("vadHits")
+      .withIndex("by_takeId", (q) => q.eq("takeId", args.takeId))
+      .unique();
+    if (existing && existing.userId === userId) await ctx.db.delete(existing._id);
+  },
+});
+
 /** One-off: assign every pre-auth orphan row to the given email's user
  *  account. Runs from the CLI (unauthenticated), so it's gated by a secret
  *  stored as the ADMIN_BACKFILL_SECRET deployment env var. */
@@ -301,8 +388,8 @@ export const backfillOrphans = mutation({
     if (!user) {
       throw new Error(`No signed-in user with email ${args.email} — sign in first`);
     }
-    const counts: Record<UserTable, number> = { takes: 0, wrongLines: 0, correctLines: 0, vadMisses: 0 };
-    for (const table of ["takes", "wrongLines", "correctLines", "vadMisses"] as const) {
+    const counts: Record<UserTable, number> = { takes: 0, wrongLines: 0, correctLines: 0, vadMisses: 0, vadHits: 0 };
+    for (const table of ["takes", "wrongLines", "correctLines", "vadMisses", "vadHits"] as const) {
       for await (const row of ctx.db.query(table)) {
         if (row.userId === undefined) {
           await ctx.db.patch(row._id, { userId: user._id });

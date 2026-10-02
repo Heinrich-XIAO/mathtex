@@ -284,20 +284,138 @@ async function runTwoStage(take, systemPrompt) {
   return { raw: d.raw ?? "", asr: d.transcript ?? "", ms: Date.now() - t0 };
 }
 
+// Mirror of src/lib/jsonHeal.ts — keep in sync (plain JS: harness can't import TS).
+function healJson(raw) {
+  let s = String(raw).trim();
+  if (s.startsWith("```")) {
+    s = s.replace(/^```(?:json)?[ \t]*\r?\n?/, "");
+    const end = s.lastIndexOf("```");
+    if (end >= 0) s = s.slice(0, end);
+    s = s.trim();
+  }
+  const start = s.search(/[{[]/);
+  if (start < 0) return null;
+  s = s.slice(start);
+
+  const stack = [];
+  let inStr = false, esc = false, strOpen = -1, prim = false;
+  const isDelim = (c) => '"{}[],:'.includes(c) || c === " " || c === "\t" || c === "\n" || c === "\r";
+  const completeValue = (end) => {
+    const f = stack[stack.length - 1];
+    if (f && f.expect === "value") {
+      f.expect = "sep";
+      f.good = end;
+    }
+  };
+
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (prim && isDelim(c)) {
+      prim = false;
+      completeValue(i);
+    }
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') {
+        inStr = false;
+        const f = stack[stack.length - 1];
+        if (f) {
+          if (f.expect === "key") {
+            f.expect = "colon";
+            f.lastKey = s.slice(strOpen + 1, i);
+          } else if (f.expect === "value") {
+            completeValue(i + 1);
+          }
+        }
+      }
+      continue;
+    }
+    switch (c) {
+      case '"': inStr = true; esc = false; strOpen = i; break;
+      case "{":
+      case "[": stack.push({ open: c, expect: c === "{" ? "key" : "value", good: -1, lastKey: "" }); break;
+      case "}":
+      case "]": {
+        const f = stack.pop();
+        if (!f || f.open !== (c === "}" ? "{" : "[")) return null;
+        const p = stack[stack.length - 1];
+        if (p) {
+          p.expect = "sep";
+          p.good = i + 1;
+        } else {
+          return { json: s.slice(0, i + 1), truncated: false };
+        }
+        break;
+      }
+      case ":": if (stack[stack.length - 1]?.expect === "colon") stack[stack.length - 1].expect = "value"; break;
+      case ",": {
+        const f = stack[stack.length - 1];
+        if (f && f.expect === "sep") {
+          f.expect = f.open === "{" ? "key" : "value";
+          f.good = i;
+        }
+        break;
+      }
+      case " ":
+      case "\t":
+      case "\n":
+      case "\r": break;
+      default: prim = true; break;
+    }
+  }
+
+  if (stack.length === 0) return null;
+
+  const closers = (frames) =>
+    frames.slice().reverse().map((f) => (f.open === "{" ? "}" : "]")).join("");
+
+  let cutFrame = null, cutDepth = -1;
+  for (let d = 0; d < stack.length; d++) {
+    if (stack[d].good >= 0) {
+      cutFrame = stack[d];
+      cutDepth = d;
+    }
+  }
+  const candidates = [];
+  if (cutFrame) candidates.push(s.slice(0, cutFrame.good) + closers(stack.slice(0, cutDepth + 1)));
+  const top = stack[stack.length - 1];
+  const tailUnsafeToClose = inStr && !!top && (top.open === "[" || top.lastKey === "latex");
+  let tail = s;
+  if (inStr && esc) tail = tail.slice(0, -1);
+  const closeCandidate = tail + (inStr ? '"' : "") + closers(stack);
+  if (tailUnsafeToClose) {
+    candidates.push(closeCandidate);
+  } else {
+    candidates.unshift(closeCandidate);
+  }
+
+  for (const cand of candidates) {
+    try {
+      JSON.parse(cand);
+      return { json: cand, truncated: true };
+    } catch {
+      /* try next candidate */
+    }
+  }
+  return null;
+}
+
 const stripFences = (s) => {
   const m = s.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
   return m ? m[1] : s;
 };
 
 function parseResult(raw) {
-  const obj = JSON.parse(stripFences(String(raw)).trim());
+  const healed = healJson(raw);
+  const obj = JSON.parse(healed ? healed.json : stripFences(String(raw)).trim());
   return {
     mode: obj.mode,
     transcript: typeof obj.transcript === "string" ? obj.transcript : "",
     latex: Array.isArray(obj.latex) ? obj.latex.filter((l) => typeof l === "string") : [obj.latex ?? ""],
     confidence: typeof obj.confidence === "number" ? obj.confidence : 0.8,
     note: typeof obj.note === "string" ? obj.note : "",
-    uncertain: obj.uncertain === true,
+    uncertain: obj.uncertain === true || (healed?.truncated ?? false),
   };
 }
 

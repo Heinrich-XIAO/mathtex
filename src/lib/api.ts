@@ -1,6 +1,7 @@
 import { SYSTEM_PROMPT } from "./prompt";
 import { pcmToWav } from "./wav";
 import { authToken, refreshAuthToken } from "./authClient";
+import { healJson } from "./jsonHeal";
 
 export type Mode = "append" | "append_lines" | "replace_line" | "delete_last" | "noop";
 
@@ -119,7 +120,12 @@ function stripFences(s: string): string {
 }
 
 
-function parseResult(raw: string): DictationResult {  const obj = JSON.parse(stripFences(raw)) as Record<string, unknown>;
+function parseResult(raw: string): DictationResult {
+  // Salvage fenced/prose-wrapped/truncated payloads before giving up to the
+  // (expensive) model repair retry. A truncation-healed parse is missing
+  // whatever the model never emitted, so surface it as uncertain.
+  const healed = healJson(raw);
+  const obj = JSON.parse(healed ? healed.json : stripFences(raw)) as Record<string, unknown>;
   const modes: Mode[] = ["append", "append_lines", "replace_line", "delete_last", "noop"];
   const mode = modes.includes(obj.mode as Mode) ? (obj.mode as Mode) : "append";
   const lines: string[] = Array.isArray(obj.latex)
@@ -133,7 +139,7 @@ function parseResult(raw: string): DictationResult {  const obj = JSON.parse(str
       ? obj.confidence
       : 0.8;
   const note = typeof obj.note === "string" ? obj.note : "";
-  const uncertain = obj.uncertain === true;
+  const uncertain = obj.uncertain === true || (healed?.truncated ?? false);
   const needsLatex = mode === "append" || mode === "append_lines" || mode === "replace_line";
   if (needsLatex && lines.length === 0) {
     throw new Error(`Missing "latex" in model response: ${JSON.stringify(obj).slice(0, 200)}`);
@@ -255,7 +261,9 @@ async function dictateAudioLlm(
     const retryBody = {
       model: MODEL,
       temperature: 0,
-      max_tokens: 400,
+      // Headroom above the main call: if the first response was cut off by
+      // max_tokens, a repair at the same cap tends to truncate identically.
+      max_tokens: 700,
       messages: [
         ...messages,
         { role: "assistant", content },

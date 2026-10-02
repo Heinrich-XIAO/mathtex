@@ -367,10 +367,40 @@ function Waveform({ level, active }: { level: { current: number }; active: boole
 
 // Fractions (\frac, \sqrt, delimiters) are unbreakable: KaTeX pre-chunks
 // breakable units (relations / binary ops) so .katex-display > .katex wraps
-// first via CSS, and only the still-overflowing remainder shrinks here.
-// Hierarchy: wrap (CSS) → shrink-to-fit (this hook) → horizontal scroll
-// (CSS overflow-x fallback). Shrinking is the last resort before scrolling.
+// first via CSS. A wrap whose first line is a tiny orphan (e.g. `x =` above
+// a tall fraction) is degenerate — KaTeX broke at the relation but the
+// remainder can't sit beside it, so we treat that as "can't wrap".
+// Hierarchy: wrap (CSS, only when the wrap is proper) → shrink-to-fit
+// (this hook, floor LATEX_MIN_SCALE) → horizontal scroll (CSS overflow-x).
+// Shrinking is the last resort before scrolling.
 const LATEX_MIN_SCALE = 0.55;
+
+// Group .katex-html's direct children (KaTeX's break chunks) into visual
+// lines by vertical overlap — inline boxes on the same line always overlap
+// vertically, and normal flow never overlaps across lines.
+function latexVisualLines(el: HTMLElement): { width: number }[] {
+  const html = el.querySelector(".katex-html");
+  if (!html) return [];
+  const lines: { top: number; bottom: number; left: number; right: number }[] = [];
+  for (const child of Array.from(html.children) as HTMLElement[]) {
+    if (getComputedStyle(child).position === "absolute") continue;
+    const r = child.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) continue;
+    const cur = lines[lines.length - 1];
+    if (cur) {
+      const overlap = Math.min(cur.bottom, r.bottom) - Math.max(cur.top, r.top);
+      if (overlap > 0.5) {
+        cur.top = Math.min(cur.top, r.top);
+        cur.bottom = Math.max(cur.bottom, r.bottom);
+        cur.left = Math.min(cur.left, r.left);
+        cur.right = Math.max(cur.right, r.right);
+        continue;
+      }
+    }
+    lines.push({ top: r.top, bottom: r.bottom, left: r.left, right: r.right });
+  }
+  return lines.map((l) => ({ width: l.right - l.left }));
+}
 
 function useAutoShrink(dep: string) {
   const ref = useRef<HTMLDivElement>(null);
@@ -383,25 +413,39 @@ function useAutoShrink(dep: string) {
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
         if (disposed || !el.isConnected) return;
+        // Everything below is measured at the base font size so the decision
+        // is stable across repeated runs (RO re-entry after fontSize changes).
         el.style.fontSize = "";
-        el.style.overflowX = "hidden";
-        const basePx = parseFloat(getComputedStyle(el).fontSize) || 20.8;
         const avail = el.clientWidth;
-        if (avail <= 0 || el.scrollWidth <= avail + 1) {
-          el.style.fontSize = "";
-          el.style.overflowX = "";
+        if (avail <= 0) return;
+        // Natural unwrapped width (max-content, same tick, never painted).
+        el.style.width = "max-content";
+        const natural = el.clientWidth;
+        el.style.width = "";
+        if (natural <= avail + 1) return; // fits on one line at full size.
+        const basePx = parseFloat(getComputedStyle(el).fontSize) || 20.8;
+        const lines = latexVisualLines(el);
+        const wrappedW = el.scrollWidth;
+        if (lines.length > 1) {
+          const maxW = Math.max(...lines.map((l) => l.width));
+          const hanging = lines[0].width < 0.5 * maxW; // orphan prefix like `x =`
+          if (!hanging) {
+            if (wrappedW <= avail + 1) return; // proper wrap fits — keep it.
+            // Wrap is proper but one line still overflows: keep the wrap and
+            // shrink just enough for the widest wrapped line.
+            const s = Math.max(LATEX_MIN_SCALE, avail / wrappedW);
+            if (s < 1) el.style.fontSize = `${(basePx * s).toFixed(2)}px`;
+            return;
+          }
+        }
+        // No proper wrap (atomic remainder or hanging prefix): one line.
+        const scale = avail / natural;
+        if (scale >= LATEX_MIN_SCALE) {
+          el.style.fontSize = `${(basePx * Math.min(1, scale) * 0.999).toFixed(2)}px`;
           return;
         }
-        const scale = Math.max(LATEX_MIN_SCALE, Math.min(1, avail / el.scrollWidth));
-        el.style.fontSize = `${(basePx * scale).toFixed(2)}px`;
-        // Narrower glyphs reflow the breakable chunks — verify once more.
-        if (el.scrollWidth > el.clientWidth + 1 && scale > LATEX_MIN_SCALE + 0.01) {
-          const scale2 = Math.max(LATEX_MIN_SCALE, scale * (el.clientWidth / el.scrollWidth));
-          el.style.fontSize = `${(basePx * scale2).toFixed(2)}px`;
-        }
-        // Still overflowing at the minimum: clear the override so the CSS
-        // overflow-x fallback (scroll) takes over.
-        el.style.overflowX = "";
+        // Even the floor can't make one line fit: scroll (CSS fallback).
+        el.style.fontSize = `${(basePx * LATEX_MIN_SCALE).toFixed(2)}px`;
       });
     };
     fit();

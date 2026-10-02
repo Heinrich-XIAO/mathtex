@@ -1,6 +1,6 @@
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
-import { getConvexClient } from "./authClient";
+import { getConvexClient, waitForAuthToken } from "./authClient";
 
 export interface FileMeta {
   id: string;
@@ -32,6 +32,10 @@ export async function listFiles(): Promise<FileMeta[]> {
   const c = getClient();
   if (!c) return [];
   try {
+    // Boot race guard: hold for the auth token before the first query, or
+    // the list can go out unauthenticated and read as empty (see
+    // waitForAuthToken in authClient).
+    await waitForAuthToken(5000);
     return await c.query(api.workspace.list, {});
   } catch (e) {
     warn(e, "listFiles");

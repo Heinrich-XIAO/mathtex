@@ -17,10 +17,42 @@ export function getConvexClient(): ConvexHttpClient | null {
  *  access tokens live ~1h, so a set token stays valid between refreshes. */
 export function setAuthToken(next: string | null): void {
   token = next;
+  if (next) {
+    // First real token has landed — release anything waiting for it.
+    const waiters = tokenWaiters;
+    tokenWaiters = null;
+    waiters?.forEach((w) => w());
+  }
   const c = getConvexClient();
   if (!c) return;
   if (next) c.setAuth(next);
   else c.clearAuth();
+}
+
+/** Waiters parked until the module client holds an auth token. */
+let tokenWaiters: (() => void)[] | null = null;
+
+/** Resolves true once setAuthToken has received a token, false on timeout.
+ *
+ *  Boot needs this: the auth provider flips isAuthenticated in the same
+ *  render commit where AuthBridge's effect copies the token into this
+ *  module client, and React runs child effects before parent effects —
+ *  so the first workspace:list could fire unauthenticated, come back as
+ *  an empty list, and boot would then mint a stray empty "Untitled"
+ *  instead of opening the user's files (observed in production). */
+export function waitForAuthToken(timeoutMs = 5000): Promise<boolean> {
+  if (token) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const waiter = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    const timer = setTimeout(() => {
+      tokenWaiters = (tokenWaiters ?? []).filter((w) => w !== waiter);
+      resolve(false);
+    }, timeoutMs);
+    tokenWaiters = [...(tokenWaiters ?? []), waiter];
+  });
 }
 
 export function authToken(): string | null {

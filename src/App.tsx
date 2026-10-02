@@ -43,7 +43,7 @@ import Landing from "./Landing";
 
 type Status = "idle" | "listening" | "thinking" | "error";
 
-interface Line {
+export interface Line {
   id: string;
   takeId: string;
   latex: string;

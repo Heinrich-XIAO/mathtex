@@ -297,6 +297,22 @@ body {
   cursor: pointer;
 }
 
+/* Neutral "did nothing, here's why" banner for automatic no-op discards
+   (blank gate, model noop, held-back delete, structural no-op). Accent
+   tint so it reads as informational, not an error (red) or a reportable
+   dismissal (amber). */
+.notice-banner {
+  background: color-mix(in srgb, var(--accent) 12%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 /* Dismissed-as-noise banner: the VAD/energy gate threw a clip away. Same
    Tinder swipe as lines — right = correctly dismissed, left = was speech
    (reports the miss and parses the clip). */

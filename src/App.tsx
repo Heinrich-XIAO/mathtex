@@ -826,6 +826,11 @@ function DismissBanner({
 export default function App() {
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState("");
+  // Neutral "heard you, did nothing, here's why" banner for every automatic
+  // no-op discard (blank gate, model noop, held-back delete, structural
+  // no-op). Unlike `error` (red, failure) this is informational; unlike
+  // `dismissed` (amber, reportable with audio) it carries no verdict actions.
+  const [notice, setNotice] = useState<string | null>(null);
   const [lines, setLines] = useState<Line[]>([]);
   // Verdicts live outside the undo history on purpose: Ctrl+Z never
   // reverts a mark — tapping a marked row clears it. "wrong" | "correct"
@@ -922,6 +927,7 @@ export default function App() {
     if (reasonTargetIdRef.current) return;
     cancelReqRef.current = false;
     setError("");
+    setNotice(null);
     setLiveResult(null);
     pollFailures.current = 0;
     setPollWarning(false);
@@ -1023,7 +1029,8 @@ export default function App() {
         );
         // A longer hold that still trips the energy gate could be a whisper
         // or a mic issue — keep its audio and offer a missed-speech report
-        // instead of dropping it silently. Taps stay silent.
+        // via the dismissed banner. Shorter holds get a notice banner instead
+        // of vanishing silently: no audio is retained for these.
         if (durationMs >= 800) {
           const blankTakeId = uid();
           const blankAsr = asrRef.current;
@@ -1079,6 +1086,12 @@ export default function App() {
               target,
             });
           }
+        } else {
+          setNotice(
+            isTargetedEdit
+              ? "Heard almost nothing — hold the line mic longer and say the full edit."
+              : "Heard almost nothing — hold the pill longer and speak up.",
+          );
         }
         setTargetIndex(undefined);
         setStatus("idle");
@@ -1161,10 +1174,12 @@ export default function App() {
         //    cheaper to prevent than to undo — an append of a stray line is a
         //    swipe away from deletion, an overwrite is not. Downgrade mutating
         //    results that arrive under-confident instead of executing them.
+        let deleteHeldBack = false;
         if (final.mode === "replace_line" && final.confidence < MUTATION_MIN_CONFIDENCE) {
           final = { ...final, mode: "append" };
         } else if (final.mode === "delete_last" && !vadConfirmed && final.confidence < MUTATION_MIN_CONFIDENCE) {
           final = { ...final, mode: "noop" };
+          deleteHeldBack = true;
         }
         // 3c) Confidence guard for low-VAD clips: hallucinated edits from
         //    noise come back unsure — only confident mutations may land.
@@ -1229,6 +1244,68 @@ export default function App() {
         }
         setProvisionalFrom(null);
         const res = final;
+        // Model noop: nothing to add, but never silent — banner what was
+        // heard (or that nothing intelligible arrived). The take is still
+        // uploaded below so the audio stays reachable.
+        if (res.mode === "noop") {
+          if (promotedAt !== null) setLines(before);
+          const heard = (res.transcript || asrRef.current).trim().slice(0, 80);
+          setNotice(
+            deleteHeldBack
+              ? `Kept the last line — the delete sounded unsure${heard ? ` (“${heard}”)` : ""}.`
+              : heard
+                ? `Heard “${heard}” — no math to add.`
+                : "Heard no math — nothing added.",
+          );
+          void uploadTake(takeId, wavAndPcm.wav, {
+            latex: final.lines.join("\n"),
+            transcript: final.transcript,
+            note: final.note,
+            confidence: final.confidence,
+            uncertain: final.uncertain,
+            asr: asrRef.current,
+            jsonHealth: finalHealth,
+          }, finalRequest);
+          setTargetIndex(undefined);
+          setLiveResult(null);
+          setStatus("idle");
+          return;
+        }
+        // Structural no-op: a mutating mode that lands on nothing
+        // (replace_line with no lines, delete_last on an empty file). The
+        // applyResult call would leave the stack visually untouched, so say
+        // so instead of going quiet.
+        {
+          const baseForCheck = promotedAt !== null ? before : linesRef.current;
+          const probe = applyResult(baseForCheck, res, target, takeId);
+          const structuralNoop =
+            probe === baseForCheck ||
+            (res.mode === "delete_last" && baseForCheck.length === 0);
+          if (structuralNoop) {
+            if (promotedAt !== null) setLines(before);
+            setNotice(
+              res.mode === "delete_last"
+                ? "Nothing to delete — the file is empty."
+                : res.mode === "replace_line"
+                  ? "Nothing to replace — there is no line to edit yet."
+                  : "Nothing changed — nothing added.",
+            );
+            void uploadTake(takeId, wavAndPcm.wav, {
+              latex: final.lines.join("\n"),
+              transcript: final.transcript,
+              note: final.note,
+              confidence: final.confidence,
+              uncertain: final.uncertain,
+              asr: asrRef.current,
+              jsonHealth: finalHealth,
+            }, finalRequest);
+            setTargetIndex(undefined);
+            setLiveResult(null);
+            setStatus("idle");
+            return;
+          }
+        }
+        setNotice(null);
         setLines((prev) => applyResult(promotedAt !== null ? before : prev, res, target, takeId));
         // Upload every take's audio immediately, whatever the line's fate
         void uploadTake(takeId, wavAndPcm.wav, {
@@ -1755,6 +1832,7 @@ export default function App() {
     switchLockRef.current = true;
     setConfirmDeleteId(null);
     setRenamingId(null);
+    setNotice(null);
     setActiveFileId(f.id);
     applyFileContext(f);
     setLines([]);
@@ -1912,6 +1990,14 @@ export default function App() {
                 setStatus("idle");
               }}
             >
+              ×
+            </button>
+          </div>
+        )}
+        {notice && !listening && !thinking && (
+          <div className="notice-banner" role="status">
+            {notice}
+            <button className="dismiss" onClick={() => setNotice(null)} aria-label="Dismiss">
               ×
             </button>
           </div>

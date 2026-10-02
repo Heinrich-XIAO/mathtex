@@ -114,7 +114,6 @@ Measured baseline (prod, gemini-3.8-flash): 3.3–5.4s, ~480 reasoning tokens pe
   - Client write-through (`src/lib/workspace.ts`): every committed lines change (dictate, delete, undo, redo, switch) pushes to Convex; rapid edits coalesce into one in-flight write of the latest stack, so out-of-order writes can't resurrect a stale snapshot.
   - File bar UI: chips (switch / inline rename / two-tap delete / new). Undo history is per-file; verdicts + typed reasons survive file switches (keyed by stable line ids).
   - Undo/redo was already in place from the verdicts work; it now also survives reload.
-- **M3 — next:** settings UI (model dropdown via /api/models), PNG/SVG export, PWA.
 
 ## Deploy notes
 
@@ -126,4 +125,3 @@ Measured baseline (prod, gemini-3.8-flash): 3.3–5.4s, ~480 reasoning tokens pe
 
 - **M1 — Core loop:** push-to-talk → proxy → JSON → KaTeX on screen. Single line, key server-side. The dy/dx example works end-to-end. ✅
 - **M2 — Product:** ~~Dexie files/multi-line~~ → Convex files/multi-line (see Status), conversational editing, transcript captions, confidence states, copy, undo. ✅
-- **M3 — Finish:** settings UI (model dropdown), PNG/SVG export, PWA.

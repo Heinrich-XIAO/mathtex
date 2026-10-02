@@ -1233,6 +1233,9 @@ export default function App() {
   return (
     <div className={`app${listening ? " listening" : ""}`}>
       <header className="filebar">
+        <button className="file-new" onClick={() => void newFile()} title="New file" aria-label="New file">
+          +
+        </button>
         {files.map((f) => {
           const active = f.id === activeFileId;
           return (
@@ -1281,9 +1284,6 @@ export default function App() {
             </div>
           );
         })}
-        <button className="file-new" onClick={() => void newFile()} title="New file" aria-label="New file">
-          +
-        </button>
       </header>
       <main className="stage">
         {error && (

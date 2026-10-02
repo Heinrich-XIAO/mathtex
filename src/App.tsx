@@ -2124,12 +2124,6 @@ export default function App() {
         <div className="context-overlay" role="dialog" aria-modal="true" aria-labelledby="context-title">
           <div className="context-dialog">
             <h2 id="context-title">Any context for the AI?</h2>
-            {activeFileId && (
-              <p className="context-sub">
-                Saved to “{files.find((f) => f.id === activeFileId)?.name ?? "this file"}” only — each
-                file keeps its own context.
-              </p>
-            )}
             <textarea
               className="context-input"
               ref={contextInputRef}

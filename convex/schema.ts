@@ -29,10 +29,34 @@ export default defineSchema({
     // an independent hearing to compare against the model's transcript.
     asr: v.optional(v.string()),
     dictatedAt: v.number(),
+    // Dismissed takes: the VAD/energy gate threw the clip away before it
+    // could become a line. Stored so a false negative ("I spoke, it heard
+    // nothing") keeps its audio evidence for a later missed-speech report.
+    dismissed: v.optional(v.boolean()),
+    // Why the clip was dismissed: "vad-guard" (VAD low + model unsure) or
+    // "blank" (too short/quiet to even send).
+    dismissReason: v.optional(v.string()),
+    // VAD snapshot at dismiss time, for tuning thresholds from real misses.
+    vadSpeechMs: v.optional(v.number()),
+    vadMaxProb: v.optional(v.number()),
+    vadMeanProb: v.optional(v.number()),
     // Exact LLM request body (JSON string) that produced this take's result —
     // model, temperature, response_format, full message array. Base64 audio
     // inside is replaced by a placeholder; the clip itself is in _storage.
     request: v.optional(v.string()),
+    // JSON health of the model response that produced this take:
+    // "clean" (parsed as-is), "healed" (salvaged by healJson without a
+    // retry), "repaired" (first parse threw, retry parse succeeded),
+    // "failed" (finalize failed; row holds the live provisional instead).
+    // Absent on takes saved before this field existed.
+    jsonHealth: v.optional(
+      v.union(
+        v.literal("clean"),
+        v.literal("healed"),
+        v.literal("repaired"),
+        v.literal("failed"),
+      ),
+    ),
   })
     .index("by_takeId", ["takeId"])
     .index("by_user_takeId", ["userId", "takeId"]),
@@ -104,4 +128,21 @@ export default defineSchema({
   })
     .index("by_lineId", ["lineId"])
     .index("by_takeId", ["takeId"]),
+
+  // Missed-speech reports: the student says "I spoke, the VAD dismissed it".
+  // One row per dismissed takeId; the audio evidence lives on the matching
+  // takes row (dismissed=true). Deleting a line never touches these — they
+  // are a historical record. Un-reporting removes the record.
+  vadMisses: defineTable({
+    userId: v.optional(v.id("users")),
+    takeId: v.string(),
+    transcript: v.string(),
+    asr: v.optional(v.string()),
+    vadSpeechMs: v.optional(v.number()),
+    vadMaxProb: v.optional(v.number()),
+    vadMeanProb: v.optional(v.number()),
+    dismissReason: v.optional(v.string()),
+    reportedAt: v.number(),
+    latencyMs: v.optional(v.number()),
+  }).index("by_takeId", ["takeId"]),
 });

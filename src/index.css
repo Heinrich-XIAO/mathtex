@@ -291,6 +291,63 @@ body {
   cursor: pointer;
 }
 
+/* Dismissed-as-noise banner: the VAD/energy gate threw a clip away. Offers
+   a one-tap missed-speech report so false negatives stay recoverable. */
+.dismiss-banner {
+  background: color-mix(in srgb, var(--amber) 12%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--amber) 35%, transparent);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dismiss-banner .dismiss {
+  margin-left: 0;
+}
+
+.dismiss-action {
+  flex: none;
+  background: transparent;
+  border: 1px solid var(--card-edge);
+  border-radius: 999px;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 0.8rem;
+  padding: 6px 13px;
+  cursor: pointer;
+  margin-left: auto;
+}
+
+.dismiss-action:hover {
+  color: var(--text);
+  border-color: var(--muted);
+}
+
+.dismiss-action.primary {
+  background: var(--amber);
+  border: none;
+  color: #1a1408;
+  font-weight: 600;
+}
+
+.dismiss-action.primary:hover {
+  filter: brightness(1.08);
+  color: #1a1408;
+}
+
+.dismiss-banner .dismiss + .dismiss-action,
+.dismiss-banner span + .dismiss-action {
+  margin-left: auto;
+}
+
+.dismiss-banner .dismiss-action + .dismiss {
+  margin-left: 0;
+}
+
 .footer {
   position: relative;
   display: flex;

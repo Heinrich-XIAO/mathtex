@@ -17,13 +17,16 @@ import {
   authHeaders,
   type CallContext,
   type DictationResult,
+  type JsonHealth,
 } from "./lib/api";
 import {
   markCorrect,
   markWrong,
+  reportVadMiss,
   setWrongReason,
   unmarkCorrect,
   unmarkWrong,
+  unreportVadMiss,
   uploadTake,
 } from "./lib/persist";
 import { useInstall } from "./lib/install";
@@ -557,6 +560,17 @@ export default function App() {
   const [targetIndex, setTargetIndex] = useState<number | undefined>(undefined);
   const [liveResult, setLiveResult] = useState<DictationResult | null>(null);
   const [provisionalFrom, setProvisionalFrom] = useState<number | null>(null);
+  // Latest dismissed clip (VAD/energy gate): kept so a false negative ("I
+  // spoke, it heard nothing") can be reported as real speech. Audio is
+  // already uploaded as a dismissed take; reporting adds a vadMisses row.
+  const [dismissed, setDismissed] = useState<{
+    takeId: string;
+    dismissReason: string;
+    vadSpeechMs?: number;
+    transcript: string;
+    asr: string;
+    reported: boolean;
+  } | null>(null);
   // Background context for the LLM: `source` is what gets sent, the dialog
   // drafts an edit of it. Opens on every page load, prefilled from storage.
   const [source, setSource] = useState<string>(() => loadStoredContext());
@@ -715,6 +729,50 @@ export default function App() {
         console.info(
           `[dictation] discard-blank dur=${durationMs}ms peak=${peak.toFixed(3)}`,
         );
+        // A longer hold that still trips the energy gate could be a whisper
+        // or a mic issue — keep its audio and offer a missed-speech report
+        // instead of dropping it silently. Taps stay silent.
+        if (durationMs >= 800) {
+          const blankTakeId = uid();
+          const blankAsr = asrRef.current;
+          try {
+            const wavAndPcmBlank = await blobToWav(blob);
+            const blankSpeech = await analyzeSpeech(wavAndPcmBlank.pcm);
+            void uploadTake(blankTakeId, wavAndPcmBlank.wav, {
+              latex: "",
+              transcript: "",
+              note: "",
+              confidence: 0,
+              ...(blankAsr ? { asr: blankAsr } : {}),
+              dismissed: true,
+              dismissReason: "blank",
+              ...(blankSpeech.ok
+                ? {
+                    vadSpeechMs: blankSpeech.speechMs,
+                    vadMaxProb: blankSpeech.maxProb,
+                    vadMeanProb: blankSpeech.meanProb,
+                  }
+                : {}),
+            }, "");
+            setDismissed({
+              takeId: blankTakeId,
+              dismissReason: "blank",
+              ...(blankSpeech.ok ? { vadSpeechMs: blankSpeech.speechMs } : {}),
+              transcript: "",
+              asr: blankAsr,
+              reported: false,
+            });
+          } catch {
+            // Conversion failed: still offer the report (metadata-only).
+            setDismissed({
+              takeId: blankTakeId,
+              dismissReason: "blank",
+              transcript: "",
+              asr: blankAsr,
+              reported: false,
+            });
+          }
+        }
         setTargetIndex(undefined);
         setStatus("idle");
         return;
@@ -763,9 +821,10 @@ export default function App() {
       //    transient 429/5xx/network blips are common; a short backoff first.
       let final: DictationResult | null = null;
       let finalRequest = "";
+      let finalHealth: JsonHealth = "failed";
       let finalErr: unknown = null;
       try {
-        ({ result: final, request: finalRequest } = await dictate(wavAndPcm.wav, ctx, {
+        ({ result: final, request: finalRequest, jsonHealth: finalHealth } = await dictate(wavAndPcm.wav, ctx, {
           vadStats,
           asr: asrRef.current,
         }));
@@ -773,7 +832,7 @@ export default function App() {
         finalErr = e;
         await new Promise((r) => setTimeout(r, 700));
         try {
-          ({ result: final, request: finalRequest } = await dictate(wavAndPcm.wav, ctx, {
+          ({ result: final, request: finalRequest, jsonHealth: finalHealth } = await dictate(wavAndPcm.wav, ctx, {
             vadStats,
             asr: asrRef.current,
           }));
@@ -814,6 +873,35 @@ export default function App() {
         );
         if (guardRejects) {
           if (promotedAt !== null) setLines(before);
+          // Keep the audio: a VAD false negative ("I spoke, it heard
+          // nothing") stays reportable via the dismissed banner instead of
+          // vanishing. The takes row carries dismissed=true + VAD stats.
+          void uploadTake(takeId, wavAndPcm.wav, {
+            latex: final.lines.join("\n"),
+            transcript: final.transcript,
+            note: final.note,
+            confidence: final.confidence,
+            uncertain: final.uncertain,
+            ...(asrRef.current ? { asr: asrRef.current } : {}),
+            jsonHealth: finalHealth,
+            dismissed: true,
+            dismissReason: "vad-guard",
+            ...(speech.ok
+              ? {
+                  vadSpeechMs: speech.speechMs,
+                  vadMaxProb: speech.maxProb,
+                  vadMeanProb: speech.meanProb,
+                }
+              : {}),
+          }, finalRequest);
+          setDismissed({
+            takeId,
+            dismissReason: "vad-guard",
+            ...(speech.ok ? { vadSpeechMs: speech.speechMs } : {}),
+            transcript: final.transcript,
+            asr: asrRef.current,
+            reported: false,
+          });
           setProvisionalFrom(null);
           setTargetIndex(undefined);
           setLiveResult(null);
@@ -831,6 +919,7 @@ export default function App() {
           confidence: final.confidence,
           uncertain: final.uncertain,
           asr: asrRef.current,
+          jsonHealth: finalHealth,
         }, finalRequest);
       } else if (promotedAt !== null) {
         // Keep the promoted provisional as a solid line, but say why it's unconfirmed
@@ -843,6 +932,7 @@ export default function App() {
           confidence: liveResult?.confidence ?? 0,
           uncertain: liveResult?.uncertain ?? false,
           asr: asrRef.current,
+          jsonHealth: "failed",
         }, liveRequestRef.current);
       } else {
         // No provisional existed: without this the attempt would vanish silently
@@ -937,6 +1027,33 @@ export default function App() {
   const skipCorrection = useCallback(() => {
     setCorrectionDraft("");
     setReasonTargetId(null);
+  }, []);
+
+  // Missed-speech report: the dismissed clip WAS real speech. The audio is
+  // already stored as a dismissed take; this adds the vadMisses verdict row.
+  const reportMissed = useCallback(() => {
+    setDismissed((d) => {
+      if (!d || d.reported) return d;
+      void reportVadMiss(d.takeId, {
+        transcript: d.transcript,
+        ...(d.asr ? { asr: d.asr } : {}),
+        ...(d.vadSpeechMs !== undefined ? { vadSpeechMs: d.vadSpeechMs } : {}),
+        dismissReason: d.dismissReason,
+      });
+      return { ...d, reported: true };
+    });
+  }, []);
+
+  const undoMissedReport = useCallback(() => {
+    setDismissed((d) => {
+      if (!d || !d.reported) return d;
+      void unreportVadMiss(d.takeId);
+      return { ...d, reported: false };
+    });
+  }, []);
+
+  const hideDismissed = useCallback(() => {
+    setDismissed(null);
   }, []);
 
   const undo = useCallback(() => {
@@ -1298,6 +1415,44 @@ export default function App() {
             >
               ×
             </button>
+          </div>
+        )}
+        {dismissed && !listening && !thinking && (
+          <div className="dismiss-banner" role="status">
+            {dismissed.reported ? (
+              <>
+                <span>Thanks — reported as missed speech.</span>
+                <button className="dismiss-action" onClick={undoMissedReport}>
+                  Undo
+                </button>
+                <button className="dismiss" onClick={hideDismissed} aria-label="Dismiss">
+                  ×
+                </button>
+              </>
+            ) : (
+              <>
+                <span>
+                  Dismissed as background noise
+                  {dismissed.vadSpeechMs !== undefined
+                    ? ` (VAD speech ${dismissed.vadSpeechMs}ms)`
+                    : ""}
+                  {dismissed.transcript || dismissed.asr
+                    ? ` — heard “${(dismissed.transcript || dismissed.asr).slice(0, 80)}”`
+                    : ""}
+                  . Was that you speaking?
+                </span>
+                <button
+                  className="dismiss-action primary"
+                  onClick={reportMissed}
+                  title="Report this clip as real speech"
+                >
+                  That was speech
+                </button>
+                <button className="dismiss" onClick={hideDismissed} aria-label="Dismiss">
+                  ×
+                </button>
+              </>
+            )}
           </div>
         )}
 

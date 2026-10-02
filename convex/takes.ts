@@ -1,10 +1,10 @@
 import { v } from "convex/values";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import type { Id } from "./_generated/dataModel";
-import { mutation } from "./_generated/server";
+import { mutation, query } from "./_generated/server";
 import type { MutationCtx } from "./_generated/server";
 
-type UserTable = "takes" | "wrongLines" | "correctLines";
+type UserTable = "takes" | "wrongLines" | "correctLines" | "vadMisses";
 
 /** Every write goes through here: no identity, no write. */
 async function requireUser(ctx: MutationCtx): Promise<Id<"users">> {
@@ -55,7 +55,15 @@ export const saveTake = mutation({
     uncertain: v.optional(v.boolean()),
     asr: v.optional(v.string()),
     dictatedAt: v.number(),
+    dismissed: v.optional(v.boolean()),
+    dismissReason: v.optional(v.string()),
+    vadSpeechMs: v.optional(v.number()),
+    vadMaxProb: v.optional(v.number()),
+    vadMeanProb: v.optional(v.number()),
     request: v.optional(v.string()),
+    jsonHealth: v.optional(
+      v.union(v.literal("clean"), v.literal("healed"), v.literal("repaired"), v.literal("failed")),
+    ),
   },
   handler: async (ctx, args) => {
     const userId = await requireUser(ctx);
@@ -72,11 +80,45 @@ export const saveTake = mutation({
         confidence: args.confidence,
         uncertain: args.uncertain,
         asr: args.asr,
+        ...(args.dismissed !== undefined ? { dismissed: args.dismissed } : {}),
+        ...(args.dismissReason !== undefined ? { dismissReason: args.dismissReason } : {}),
+        ...(args.vadSpeechMs !== undefined ? { vadSpeechMs: args.vadSpeechMs } : {}),
+        ...(args.vadMaxProb !== undefined ? { vadMaxProb: args.vadMaxProb } : {}),
+        ...(args.vadMeanProb !== undefined ? { vadMeanProb: args.vadMeanProb } : {}),
         ...(args.request !== undefined ? { request: args.request } : {}),
+        ...(args.jsonHealth !== undefined ? { jsonHealth: args.jsonHealth } : {}),
       });
       return;
     }
     await ctx.db.insert("takes", { ...args, userId });
+  },
+});
+
+/** Failure-rate aggregate for model JSON health: counts per jsonHealth over
+ *  takes that carry the field (rows saved before the field existed are
+ *  reported as `unknown` so the denominator stays honest). */
+export const healthStats = query({
+  args: {},
+  handler: async (ctx) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) return null;
+    const counts = { clean: 0, healed: 0, repaired: 0, failed: 0, unknown: 0 };
+    for await (const take of ctx.db
+      .query("takes")
+      .withIndex("by_user_takeId", (q) => q.eq("userId", userId))) {
+      const h = take.jsonHealth;
+      if (h === "clean" || h === "healed" || h === "repaired" || h === "failed") counts[h] += 1;
+      else counts.unknown += 1;
+    }
+    const total = counts.clean + counts.healed + counts.repaired + counts.failed + counts.unknown;
+    const tracked = total - counts.unknown;
+    return {
+      ...counts,
+      total,
+      tracked,
+      // Share of tracked takes whose first response was not clean JSON.
+      failureRate: tracked === 0 ? null : (counts.healed + counts.repaired + counts.failed) / tracked,
+    };
   },
 });
 
@@ -196,6 +238,49 @@ export const unmarkCorrect = mutation({
   },
 });
 
+/** Report a dismissed clip as real speech (VAD false negative).
+ *  Idempotent per takeId: the audio evidence lives on the matching takes
+ *  row (dismissed=true). */
+export const reportVadMiss = mutation({
+  args: {
+    takeId: v.string(),
+    transcript: v.string(),
+    asr: v.optional(v.string()),
+    vadSpeechMs: v.optional(v.number()),
+    vadMaxProb: v.optional(v.number()),
+    vadMeanProb: v.optional(v.number()),
+    dismissReason: v.optional(v.string()),
+    reportedAt: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const userId = await requireUser(ctx);
+    const existing = await ctx.db
+      .query("vadMisses")
+      .withIndex("by_takeId", (q) => q.eq("takeId", args.takeId))
+      .unique();
+    if (existing) return;
+    const latencyMs = await verdictLatency(ctx, userId, args.takeId, args.reportedAt);
+    await ctx.db.insert("vadMisses", {
+      ...args,
+      ...(latencyMs !== undefined ? { latencyMs } : {}),
+      userId,
+    });
+  },
+});
+
+/** Retract a missed-speech report. Removes the record entirely. */
+export const unreportVadMiss = mutation({
+  args: { takeId: v.string() },
+  handler: async (ctx, args) => {
+    const userId = await requireUser(ctx);
+    const existing = await ctx.db
+      .query("vadMisses")
+      .withIndex("by_takeId", (q) => q.eq("takeId", args.takeId))
+      .unique();
+    if (existing && existing.userId === userId) await ctx.db.delete(existing._id);
+  },
+});
+
 /** One-off: assign every pre-auth orphan row to the given email's user
  *  account. Runs from the CLI (unauthenticated), so it's gated by a secret
  *  stored as the ADMIN_BACKFILL_SECRET deployment env var. */
@@ -216,8 +301,8 @@ export const backfillOrphans = mutation({
     if (!user) {
       throw new Error(`No signed-in user with email ${args.email} — sign in first`);
     }
-    const counts: Record<UserTable, number> = { takes: 0, wrongLines: 0, correctLines: 0 };
-    for (const table of ["takes", "wrongLines", "correctLines"] as const) {
+    const counts: Record<UserTable, number> = { takes: 0, wrongLines: 0, correctLines: 0, vadMisses: 0 };
+    for (const table of ["takes", "wrongLines", "correctLines", "vadMisses"] as const) {
       for await (const row of ctx.db.query(table)) {
         if (row.userId === undefined) {
           await ctx.db.patch(row._id, { userId: user._id });

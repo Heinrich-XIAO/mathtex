@@ -1,9 +1,14 @@
 import { SYSTEM_PROMPT } from "./prompt";
 import { pcmToWav } from "./wav";
 import { authToken, refreshAuthToken } from "./authClient";
-import { healJson } from "./jsonHeal";
+import { healJson, type HealedJson } from "./jsonHeal";
 
 export type Mode = "append" | "append_lines" | "replace_line" | "delete_last" | "noop";
+
+/** JSON health of one model response: "clean" parsed as-is, "healed" was
+ *  salvaged by healJson without a retry, "repaired" needed the repair
+ *  retry, "failed" never parsed (caller keeps the live provisional). */
+export type JsonHealth = "clean" | "healed" | "repaired" | "failed";
 
 export interface DictationResult {
   mode: Mode;
@@ -120,12 +125,23 @@ function stripFences(s: string): string {
 }
 
 
-function parseResult(raw: string): DictationResult {
+function parseResult(raw: string): { result: DictationResult; healed: boolean } {
   // Salvage fenced/prose-wrapped/truncated payloads before giving up to the
   // (expensive) model repair retry. A truncation-healed parse is missing
   // whatever the model never emitted, so surface it as uncertain.
-  const healed = healJson(raw);
-  const obj = JSON.parse(healed ? healed.json : stripFences(raw)) as Record<string, unknown>;
+  // `healed` reports whether the first response needed salvage (anything
+  // beyond a direct parse), so callers can record JSON health. Note healJson
+  // also returns non-null for clean input, so a direct parse is tried first.
+  let obj: Record<string, unknown>;
+  let salvage: HealedJson | null = null;
+  try {
+    obj = JSON.parse(stripFences(raw)) as Record<string, unknown>;
+  } catch {
+    salvage = healJson(raw);
+    if (!salvage) throw new Error(`Invalid JSON in model response: ${raw.slice(0, 120)}`);
+    obj = JSON.parse(salvage.json) as Record<string, unknown>;
+  }
+  const healed = salvage !== null;
   const modes: Mode[] = ["append", "append_lines", "replace_line", "delete_last", "noop"];
   const mode = modes.includes(obj.mode as Mode) ? (obj.mode as Mode) : "append";
   const lines: string[] = Array.isArray(obj.latex)
@@ -139,7 +155,7 @@ function parseResult(raw: string): DictationResult {
       ? obj.confidence
       : 0.8;
   const note = typeof obj.note === "string" ? obj.note : "";
-  const uncertain = obj.uncertain === true || (healed?.truncated ?? false);
+  const uncertain = obj.uncertain === true || (salvage?.truncated ?? false);
   const needsLatex = mode === "append" || mode === "append_lines" || mode === "replace_line";
   if (needsLatex && lines.length === 0) {
     throw new Error(`Missing "latex" in model response: ${JSON.stringify(obj).slice(0, 200)}`);
@@ -147,14 +163,14 @@ function parseResult(raw: string): DictationResult {
   if (mode === "append_lines" && lines.length < 2) {
     throw new Error(`"append_lines" requires multiple lines: ${JSON.stringify(obj).slice(0, 200)}`);
   }
-  return { mode, transcript, lines, confidence, uncertain, note };
+  return { result: { mode, transcript, lines, confidence, uncertain, note }, healed };
 }
 
 export async function dictate(
   wav: ArrayBuffer,
   ctx: CallContext,
   opts?: { signal?: AbortSignal; vadStats?: string; asr?: string },
-): Promise<{ result: DictationResult; request: string }> {
+): Promise<{ result: DictationResult; request: string; jsonHealth: JsonHealth }> {
   return dictateAudioLlm(wav, ctx, opts);
 }
 
@@ -180,7 +196,7 @@ export async function liveConvert(
   let result: DictationResult | null = null;
   if (data.raw) {
     try {
-      result = parseResult(data.raw);
+      result = parseResult(data.raw).result;
     } catch {
       result = null;
     }
@@ -192,7 +208,7 @@ async function dictateAudioLlm(
   wav: ArrayBuffer,
   ctx: CallContext,
   opts?: { signal?: AbortSignal; vadStats?: string; asr?: string },
-): Promise<{ result: DictationResult; request: string }> {
+): Promise<{ result: DictationResult; request: string; jsonHealth: JsonHealth }> {
   mustConfig();
   const signal = opts?.signal;
   const b64 = arrayBufferToBase64(wav);
@@ -256,7 +272,12 @@ async function dictateAudioLlm(
   }
 
   try {
-    return { result: parseResult(content), request: requestForDb(accepted) };
+    const parsed = parseResult(content);
+    return {
+      result: parsed.result,
+      request: requestForDb(accepted),
+      jsonHealth: parsed.healed ? "healed" : "clean",
+    };
   } catch {
     const retryBody = {
       model: MODEL,
@@ -285,7 +306,13 @@ async function dictateAudioLlm(
     };
     const retryContent = data.choices?.[0]?.message?.content;
     if (!retryContent) throw new Error("Model returned empty response on retry");
-    return { result: parseResult(retryContent), request: requestForDb(retryBody) };
+    const parsed = parseResult(retryContent);
+    return {
+      result: parsed.result,
+      request: requestForDb(retryBody),
+      // First response failed to parse, so even a clean retry counts as repaired.
+      jsonHealth: "repaired",
+    };
   }
 }
 

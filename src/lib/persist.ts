@@ -1,6 +1,7 @@
 import type { Id } from "../../convex/_generated/dataModel";
 import { api } from "../../convex/_generated/api";
 import { getConvexClient } from "./authClient";
+import type { JsonHealth } from "./api";
 
 function getClient() {
   return getConvexClient();
@@ -15,6 +16,25 @@ export interface TakeMeta {
   uncertain?: boolean;
   /** Neutral ASR witness transcript (fish-audio) captured during the hold. */
   asr?: string;
+  /** JSON health of the model response: clean/healed/repaired/failed. */
+  jsonHealth?: JsonHealth;
+  /** True when this take was dismissed (VAD/energy gate) instead of landing. */
+  dismissed?: boolean;
+  /** Why the clip was dismissed: "vad-guard" or "blank". */
+  dismissReason?: string;
+  /** VAD snapshot at dismiss time, for tuning thresholds from real misses. */
+  vadSpeechMs?: number;
+  vadMaxProb?: number;
+  vadMeanProb?: number;
+}
+
+export interface VadMissMeta {
+  transcript: string;
+  asr?: string;
+  vadSpeechMs?: number;
+  vadMaxProb?: number;
+  vadMeanProb?: number;
+  dismissReason?: string;
 }
 
 /** Push a dictated take's audio + metadata to Convex. Fire-and-forget.
@@ -58,6 +78,39 @@ function verdictMeta(meta: TakeMeta) {
     confidence: meta.confidence,
     ...(meta.uncertain !== undefined ? { uncertain: meta.uncertain } : {}),
   };
+}
+
+/** Report a dismissed clip as real speech (VAD false negative).
+ *  Fire-and-forget. Idempotent per takeId; the audio evidence lives on the
+ *  matching takes row (dismissed=true). */
+export async function reportVadMiss(takeId: string, meta: VadMissMeta): Promise<void> {
+  const c = getClient();
+  if (!c) return;
+  try {
+    await c.mutation(api.takes.reportVadMiss, {
+      takeId,
+      transcript: meta.transcript,
+      ...(meta.asr !== undefined ? { asr: meta.asr } : {}),
+      ...(meta.vadSpeechMs !== undefined ? { vadSpeechMs: meta.vadSpeechMs } : {}),
+      ...(meta.vadMaxProb !== undefined ? { vadMaxProb: meta.vadMaxProb } : {}),
+      ...(meta.vadMeanProb !== undefined ? { vadMeanProb: meta.vadMeanProb } : {}),
+      ...(meta.dismissReason !== undefined ? { dismissReason: meta.dismissReason } : {}),
+      reportedAt: Date.now(),
+    });
+  } catch (e) {
+    console.warn("[convex] reportVadMiss failed", e);
+  }
+}
+
+/** Retract a missed-speech report. Fire-and-forget. */
+export async function unreportVadMiss(takeId: string): Promise<void> {
+  const c = getClient();
+  if (!c) return;
+  try {
+    await c.mutation(api.takes.unreportVadMiss, { takeId });
+  } catch (e) {
+    console.warn("[convex] unreportVadMiss failed", e);
+  }
 }
 
 /** Flag a line as wrong in the database. Fire-and-forget. */

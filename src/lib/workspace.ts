@@ -1,6 +1,6 @@
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
-import { getConvexClient, waitForAuthToken } from "./authClient";
+import { ensureAuthTokenReady, getConvexClient } from "./authClient";
 
 export interface FileMeta {
   id: string;
@@ -46,10 +46,11 @@ export async function listFiles(): Promise<FileMeta[]> {
   const c = getClient();
   if (!c) return [];
   try {
-    // Boot race guard: hold for the auth token before the first query, or
+    // Boot race guard: hold for an auth token before the first query, or
     // the list can go out unauthenticated and read as empty (see
-    // waitForAuthToken in authClient).
-    await waitForAuthToken(5000);
+    // ensureAuthTokenReady in authClient). Also refreshes an expired cached
+    // JWT — the case where a cold load otherwise opens an empty workspace.
+    await ensureAuthTokenReady();
     return await c.query(api.workspace.list, {});
   } catch (e) {
     warn(e, "listFiles");
@@ -105,6 +106,7 @@ export async function loadLines(fileId: string): Promise<LineData[] | null> {
   const c = getClient();
   if (!c) return null;
   try {
+    await ensureAuthTokenReady();
     return await c.query(api.workspace.getLines, { fileId: fileId as Id<"files"> });
   } catch (e) {
     warn(e, "loadLines");

@@ -59,6 +59,54 @@ export function authToken(): string | null {
   return token;
 }
 
+/** Decode a JWT's `exp` (seconds) without verifying the signature — a
+ *  client-side freshness estimate only, used to decide whether the first
+ *  Convex query can safely reuse the cached token. */
+function jwtExpiry(jwt: string): number | null {
+  const part = jwt.split(".")[1];
+  if (!part) return null;
+  try {
+    const base64 = part.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+    const payload = JSON.parse(atob(padded)) as { exp?: number };
+    return typeof payload.exp === "number" ? payload.exp : null;
+  } catch {
+    return null;
+  }
+}
+
+/** True when the cached access token is missing, unreadable, or within the
+ *  refresh leeway of expiry. Convex Auth persists the JWT in localStorage and
+ *  only rotates it on a schedule while a client is connected; a page load
+ *  after the token has lapsed still presents the stale JWT as
+ *  `isAuthenticated`, and a query sent with it reads as unauthenticated
+ *  (empty) until the React client's background refresh lands. */
+function tokenExpiringSoon(leewaySeconds = 60): boolean {
+  if (!token) return true;
+  const exp = jwtExpiry(token);
+  if (exp === null) return true;
+  return exp - Date.now() / 1000 <= leewaySeconds;
+}
+
+/** Boot guard: hold until the module client has an auth token the backend
+ *  will actually accept. waitForAuthToken only proves a token exists — the
+ *  stored JWT can be expired on a cold load, in which case the first
+ *  workspace:list reads as empty and boot mints a stray default-named file
+ *  instead of opening the user's documents (observed in production). Force a
+ *  refresh through AuthBridge's fetchAccessToken when the token is stale. */
+export async function ensureAuthTokenReady(): Promise<void> {
+  await waitForAuthToken(5000);
+  if (!tokenExpiringSoon()) return;
+  // Bounded: a hung refresh must not wedge boot on the loading screen. On
+  // timeout we fall back to the cached token and let the query's own retry
+  // path recover.
+  const fresh = await Promise.race([
+    refreshAuthToken(),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000)),
+  ]);
+  if (fresh) setAuthToken(fresh);
+}
+
 /** AuthBridge registers the provider's fetchAccessToken here so non-React
  *  code (api.ts) can force a fresh JWT when an edge call comes back 401. */
 let refresher: (() => Promise<string | null>) | null = null;
